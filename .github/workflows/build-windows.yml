@@ -47,8 +47,10 @@ jobs:
           if ($zip.Length -ne 93861) { throw "Unexpected source ZIP size: $($zip.Length), expected 93861" }
           $hash = (Get-FileHash 'ChordScope_Desktop_V2_0_SOURCE.zip' -Algorithm SHA256).Hash.ToLower()
           if ($hash -ne 'f32d083e2d1a890bb721c20131d25e867ed94c899a2e7d48f81a6327444bde02') { throw "Source ZIP checksum mismatch" }
-          & tar -tf 'ChordScope_Desktop_V2_0_SOURCE.zip' | Select-Object -First 12 | ForEach-Object { Write-Host $_ }
-          if ($LASTEXITCODE -ne 0) { throw "ZIP integrity listing failed" }
+          $listing = & tar -tf 'ChordScope_Desktop_V2_0_SOURCE.zip'
+          $tarExit = $LASTEXITCODE
+          if ($tarExit -ne 0) { throw "ZIP integrity listing failed with exit code $tarExit" }
+          $listing | Select-Object -First 12 | ForEach-Object { Write-Host $_ }
           & tar -xf 'ChordScope_Desktop_V2_0_SOURCE.zip'
           if ($LASTEXITCODE -ne 0) { throw "ZIP extraction failed" }
           if (!(Test-Path 'ChordScope_Desktop_V2_0/requirements.txt')) { throw 'Extracted project missing requirements.txt' }
