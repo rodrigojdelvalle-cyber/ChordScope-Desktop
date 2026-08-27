@@ -1,0 +1,137 @@
+name: Build ChordScope Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'source.part*.b64'
+      - '.github/workflows/build-windows.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 360
+    env:
+      PYTHONUTF8: '1'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      HF_HUB_DISABLE_SYMLINKS_WARNING: '1'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Reconstruct source archive
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem 'source.part*.b64' | Sort-Object Name
+          if ($parts.Count -eq 0) { throw 'Missing source.part*.b64 files' }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          [IO.File]::WriteAllBytes('ChordScope_Desktop_V2_0_SOURCE.zip',[Convert]::FromBase64String($b64))
+          Expand-Archive -Path 'ChordScope_Desktop_V2_0_SOURCE.zip' -DestinationPath '.' -Force
+
+      - name: Setup Python 3.11 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: 'x64'
+          cache: 'pip'
+          cache-dependency-path: 'ChordScope_Desktop_V2_0/requirements.txt'
+
+      - name: Upgrade build tools
+        working-directory: ChordScope_Desktop_V2_0
+        run: python -m pip install --upgrade pip setuptools wheel
+
+      - name: Install CPU PyTorch
+        working-directory: ChordScope_Desktop_V2_0
+        run: python -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install ChordScope dependencies
+        working-directory: ChordScope_Desktop_V2_0
+        run: python -m pip install -r requirements.txt
+
+      - name: Install test tools
+        working-directory: ChordScope_Desktop_V2_0
+        run: python -m pip install pytest
+
+      - name: Python compile check
+        working-directory: ChordScope_Desktop_V2_0
+        run: python -m compileall -q main.py chordscope prepare_models.py self_test.py
+
+      - name: Unit tests
+        working-directory: ChordScope_Desktop_V2_0
+        run: python -m pytest -q
+
+      - name: Prepare offline models
+        working-directory: ChordScope_Desktop_V2_0
+        shell: pwsh
+        run: |
+          python prepare_models.py
+          if ($LASTEXITCODE -ne 0) { throw "prepare_models.py failed with exit code $LASTEXITCODE" }
+
+      - name: Verify model assets
+        working-directory: ChordScope_Desktop_V2_0
+        shell: pwsh
+        run: |
+          if (!(Test-Path 'vendor_models')) { throw 'vendor_models missing' }
+          Get-ChildItem vendor_models -Recurse | Select-Object FullName,Length
+
+      - name: Build ChordScope.exe with Nuitka
+        working-directory: ChordScope_Desktop_V2_0
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          python -m nuitka `
+            --mode=onefile `
+            --enable-plugin=pyside6 `
+            --windows-console-mode=disable `
+            --assume-yes-for-downloads `
+            --output-dir=dist `
+            --output-filename=ChordScope.exe `
+            --product-name=ChordScope `
+            --file-description='ChordScope Desktop - Music Analysis' `
+            --file-version=2.0.0.0 `
+            --product-version=2.0.0.0 `
+            --include-data-dir=chordscope/frontend=chordscope/frontend `
+            --include-data-dir=chordscope/data=chordscope/data `
+            --include-data-dir=vendor_models=vendor_models `
+            --include-package-data=lv_chordia `
+            --include-package-data=beat_this `
+            --include-package-data=demucs_infer `
+            --include-package=transformers `
+            --include-package=huggingface_hub `
+            --include-package=lv_chordia `
+            --include-package=beat_this `
+            --include-package=demucs_infer `
+            --include-package=librosa `
+            --include-package=soundfile `
+            --include-package=scipy `
+            --include-package=torch `
+            --include-package=torchaudio `
+            --nofollow-import-to=matplotlib `
+            --nofollow-import-to=pytest `
+            --nofollow-import-to=IPython `
+            main.py
+          if ($LASTEXITCODE -ne 0) { throw "Nuitka failed with exit code $LASTEXITCODE" }
+
+      - name: Verify executable
+        working-directory: ChordScope_Desktop_V2_0
+        shell: pwsh
+        run: |
+          if (!(Test-Path 'dist/ChordScope.exe')) { throw 'ChordScope.exe was not produced' }
+          $f = Get-Item 'dist/ChordScope.exe'
+          Write-Host "ChordScope.exe size: $($f.Length) bytes"
+          if ($f.Length -lt 10000000) { throw 'Executable is unexpectedly small' }
+          Get-FileHash 'dist/ChordScope.exe' -Algorithm SHA256 | Format-List
+
+      - name: Upload ChordScope.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChordScope-Windows-x64
+          path: ChordScope_Desktop_V2_0/dist/ChordScope.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
