@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - 'source.part*.b64'
+      - 'patches/**'
       - '.github/workflows/build-windows.yml'
 
 permissions:
@@ -79,6 +80,16 @@ jobs:
           if (!(Test-Path 'ChordScope_Desktop_V2_0/requirements.txt')) { throw 'Extracted project missing requirements.txt' }
           if (!(Test-Path 'ChordScope_Desktop_V2_0/chordscope/frontend/index.html')) { throw 'Extracted project missing frontend' }
 
+      - name: Apply current ChordScope source overlays
+        shell: pwsh
+        run: |
+          Copy-Item 'patches/prepare_models.py' 'ChordScope_Desktop_V2_0/prepare_models.py' -Force
+          Copy-Item 'patches/requirements.txt' 'ChordScope_Desktop_V2_0/requirements.txt' -Force
+          Copy-Item 'patches/chordscope/analysis/separation.py' 'ChordScope_Desktop_V2_0/chordscope/analysis/separation.py' -Force
+          Copy-Item 'patches/tests/test_separation.py' 'ChordScope_Desktop_V2_0/tests/test_separation.py' -Force
+          Select-String -Path 'ChordScope_Desktop_V2_0/chordscope/analysis/separation.py' -Pattern 'from demucs_infer.api import Separator' | Write-Host
+          Select-String -Path 'ChordScope_Desktop_V2_0/prepare_models.py' -Pattern 'from demucs_infer.api import Separator' | Write-Host
+
       - name: Setup Python 3.11 x64
         uses: actions/setup-python@v5
         with:
@@ -99,14 +110,12 @@ jobs:
         working-directory: ChordScope_Desktop_V2_0
         run: python -m pip install -r requirements.txt
 
-      - name: Install pinned DemucsSession build
+      - name: Verify stable Demucs Separator API
         working-directory: ChordScope_Desktop_V2_0
         shell: pwsh
         run: |
-          python -m pip install --upgrade "https://github.com/openmirlab/demucs-infer/archive/1e76ce6054ede0e19f03fda768790d37c868f330.zip"
-          if ($LASTEXITCODE -ne 0) { throw 'Pinned demucs-infer install failed' }
-          python -c "from demucs_infer import DemucsSession; print('DemucsSession API OK')"
-          if ($LASTEXITCODE -ne 0) { throw 'DemucsSession API unavailable after pinned install' }
+          python -c "from demucs_infer.api import Separator; s=Separator(model='demucs_unittest', device='cpu', shifts=0); print('Separator API OK ·', s.samplerate, 'Hz')"
+          if ($LASTEXITCODE -ne 0) { throw 'demucs_infer.api.Separator unavailable' }
 
       - name: Install test tools
         working-directory: ChordScope_Desktop_V2_0
@@ -131,6 +140,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "prepare_models.py failed with exit code $LASTEXITCODE" }
           $sum=(Get-ChildItem vendor_models -Recurse -File | Measure-Object Length -Sum).Sum
           Write-Host "Offline models: $([math]::Round($sum/1MB,1)) MB"
+          $demucs=(Get-ChildItem vendor_models/demucs -File | Measure-Object).Count
+          if ($demucs -lt 5) { throw "Demucs offline repository incomplete: $demucs files" }
 
       - name: Build ChordScope.exe with Nuitka
         working-directory: ChordScope_Desktop_V2_0
@@ -180,6 +191,13 @@ jobs:
           if ($f.Length -lt 10000000) { throw 'Executable is unexpectedly small' }
           Get-FileHash 'dist/ChordScope.exe' -Algorithm SHA256 | Format-List
 
+      - name: Create patched source archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path 'ChordScope_Desktop_V2_0' -DestinationPath 'ChordScope_Desktop_V2_0_PATCHED_SOURCE.zip' -CompressionLevel Optimal -Force
+          $f=Get-Item 'ChordScope_Desktop_V2_0_PATCHED_SOURCE.zip'
+          Write-Host "Patched source ZIP: $([math]::Round($f.Length/1KB,1)) KB"
+
       - name: Upload ChordScope.exe
         uses: actions/upload-artifact@v4
         with:
@@ -189,11 +207,11 @@ jobs:
           compression-level: 0
           retention-days: 30
 
-      - name: Upload validated source ZIP
+      - name: Upload patched source ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: ChordScope-Source-Validated
-          path: ChordScope_Desktop_V2_0_SOURCE.zip
+          name: ChordScope-Source-Patched
+          path: ChordScope_Desktop_V2_0_PATCHED_SOURCE.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
