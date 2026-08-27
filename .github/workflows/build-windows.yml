@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'ChordScope_Desktop_V2_0_SOURCE.zip'
+      - 'source.part*.b64'
       - '.github/workflows/build-windows.yml'
 
 permissions:
@@ -19,17 +19,38 @@ jobs:
       PYTHONUTF8: '1'
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
       HF_HUB_DISABLE_SYMLINKS_WARNING: '1'
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Extract source archive
+      - name: Reconstruct and validate source archive
         shell: pwsh
         run: |
-          if (!(Test-Path 'ChordScope_Desktop_V2_0_SOURCE.zip')) { throw 'Source archive missing' }
+          $parts = Get-ChildItem 'source.part*.b64' | Sort-Object Name
+          if ($parts.Count -ne 13) { throw "Expected 13 source parts, found $($parts.Count)" }
+
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          $b64 = [regex]::Replace($b64, '\s', '')
+          $bytes = [Convert]::FromBase64String($b64)
+          [IO.File]::WriteAllBytes('ChordScope_Desktop_V2_0_SOURCE.zip', $bytes)
+
+          $zip = Get-Item 'ChordScope_Desktop_V2_0_SOURCE.zip'
+          Write-Host "Reconstructed source ZIP: $($zip.Length) bytes"
+          if ($zip.Length -ne 93861) { throw "Unexpected source ZIP size: $($zip.Length), expected 93861" }
+
+          $hash = (Get-FileHash 'ChordScope_Desktop_V2_0_SOURCE.zip' -Algorithm SHA256).Hash.ToLower()
+          Write-Host "Source ZIP SHA256: $hash"
+          if ($hash -ne 'f32d083e2d1a890bb721c20131d25e867ed94c899a2e7d48f81a6327444bde02') {
+            throw "Source ZIP checksum mismatch"
+          }
+
+          tar -tf 'ChordScope_Desktop_V2_0_SOURCE.zip' | Select-Object -First 12
+          if ($LASTEXITCODE -ne 0) { throw "ZIP integrity listing failed" }
           tar -xf 'ChordScope_Desktop_V2_0_SOURCE.zip'
-          if ($LASTEXITCODE -ne 0) { throw "tar extraction failed with exit code $LASTEXITCODE" }
-          if (!(Test-Path 'ChordScope_Desktop_V2_0/requirements.txt')) { throw 'Extracted project missing' }
+          if ($LASTEXITCODE -ne 0) { throw "ZIP extraction failed" }
+          if (!(Test-Path 'ChordScope_Desktop_V2_0/requirements.txt')) { throw 'Extracted project missing requirements.txt' }
+          if (!(Test-Path 'ChordScope_Desktop_V2_0/chordscope/frontend/index.html')) { throw 'Extracted project missing frontend' }
 
       - name: Setup Python 3.11 x64
         uses: actions/setup-python@v5
@@ -60,8 +81,11 @@ jobs:
         shell: pwsh
         run: |
           python -m compileall -q main.py chordscope prepare_models.py self_test.py
+          if ($LASTEXITCODE -ne 0) { throw 'Python compile check failed' }
           python -m pytest -q
+          if ($LASTEXITCODE -ne 0) { throw 'Unit tests failed' }
           python self_test.py
+          if ($LASTEXITCODE -ne 0) { throw 'Self test failed' }
 
       - name: Prepare offline models
         working-directory: ChordScope_Desktop_V2_0
@@ -125,6 +149,15 @@ jobs:
         with:
           name: ChordScope-Windows-x64
           path: ChordScope_Desktop_V2_0/dist/ChordScope.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Upload validated source ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChordScope-Source-Validated
+          path: ChordScope_Desktop_V2_0_SOURCE.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
