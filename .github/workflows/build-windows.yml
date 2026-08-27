@@ -7,6 +7,7 @@ on:
     paths:
       - 'source.part*.b64'
       - 'patches/**'
+      - 'DEVELOPMENT_STATE.md'
       - '.github/workflows/build-windows.yml'
 
 permissions:
@@ -30,61 +31,42 @@ jobs:
         run: |
           $parts = Get-ChildItem 'source.part*.b64' | Sort-Object Name
           if ($parts.Count -ne 13) { throw "Expected 13 source parts, found $($parts.Count)" }
-
           $out = [IO.File]::Open('ChordScope_Desktop_V2_0_SOURCE.zip',[IO.FileMode]::Create)
           try {
             foreach ($part in $parts) {
               $raw = Get-Content $part.FullName -Raw
               $clean = [regex]::Replace($raw, '\s', '')
               Write-Host "$($part.Name): raw=$($raw.Length), clean=$($clean.Length)"
-              if ($clean -notmatch '^[A-Za-z0-9+/]*={0,2}$') {
-                $bad = for ($i=0; $i -lt $clean.Length; $i++) {
-                  $ch = $clean[$i]
-                  if ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".IndexOf($ch) -lt 0) {
-                    "index=$i char=[$ch] code=$([int][char]$ch)"
-                    break
-                  }
-                }
-                throw "Invalid base64 character in $($part.Name): $bad"
-              }
+              if ($clean -notmatch '^[A-Za-z0-9+/]*={0,2}$') { throw "Invalid base64 characters in $($part.Name)" }
               if (($clean.Length % 4) -ne 0) { throw "Invalid base64 length in $($part.Name): $($clean.Length)" }
-              try {
-                $chunk = [Convert]::FromBase64String($clean)
-              } catch {
-                throw "Base64 decode failed in $($part.Name): $($_.Exception.Message)"
-              }
+              $chunk = [Convert]::FromBase64String($clean)
               $out.Write($chunk,0,$chunk.Length)
             }
-          } finally {
-            $out.Dispose()
-          }
-
+          } finally { $out.Dispose() }
           $zip = Get-Item 'ChordScope_Desktop_V2_0_SOURCE.zip'
-          Write-Host "Reconstructed source ZIP: $($zip.Length) bytes"
           if ($zip.Length -ne 93861) { throw "Unexpected source ZIP size: $($zip.Length), expected 93861" }
-
           $hash = (Get-FileHash 'ChordScope_Desktop_V2_0_SOURCE.zip' -Algorithm SHA256).Hash.ToLower()
-          Write-Host "Source ZIP SHA256: $hash"
-          if ($hash -ne 'f32d083e2d1a890bb721c20131d25e867ed94c899a2e7d48f81a6327444bde02') {
-            throw "Source ZIP checksum mismatch"
-          }
-
-          $listing = & tar -tf 'ChordScope_Desktop_V2_0_SOURCE.zip'
+          if ($hash -ne 'f32d083e2d1a890bb721c20131d25e867ed94c899a2e7d48f81a6327444bde02') { throw "Source ZIP checksum mismatch" }
+          & tar -tf 'ChordScope_Desktop_V2_0_SOURCE.zip' | Select-Object -First 12 | ForEach-Object { Write-Host $_ }
           if ($LASTEXITCODE -ne 0) { throw "ZIP integrity listing failed" }
-          $listing | Select-Object -First 12 | ForEach-Object { Write-Host $_ }
           & tar -xf 'ChordScope_Desktop_V2_0_SOURCE.zip'
           if ($LASTEXITCODE -ne 0) { throw "ZIP extraction failed" }
           if (!(Test-Path 'ChordScope_Desktop_V2_0/requirements.txt')) { throw 'Extracted project missing requirements.txt' }
           if (!(Test-Path 'ChordScope_Desktop_V2_0/chordscope/frontend/index.html')) { throw 'Extracted project missing frontend' }
 
-      - name: Apply current ChordScope source overlays
+      - name: Apply v2.0.1 runtime hotfix overlays
         shell: pwsh
         run: |
           Copy-Item 'patches/prepare_models.py' 'ChordScope_Desktop_V2_0/prepare_models.py' -Force
           Copy-Item 'patches/requirements.txt' 'ChordScope_Desktop_V2_0/requirements.txt' -Force
-          Copy-Item 'patches/chordscope/analysis/separation.py' 'ChordScope_Desktop_V2_0/chordscope/analysis/separation.py' -Force
-          Copy-Item 'patches/tests/test_separation.py' 'ChordScope_Desktop_V2_0/tests/test_separation.py' -Force
+          Copy-Item 'patches/main.py' 'ChordScope_Desktop_V2_0/main.py' -Force
+          Copy-Item 'patches/chordscope/runtime_smoke.py' 'ChordScope_Desktop_V2_0/chordscope/runtime_smoke.py' -Force
+          Copy-Item 'patches/chordscope/analysis/*.py' 'ChordScope_Desktop_V2_0/chordscope/analysis/' -Force
+          Copy-Item 'patches/tests/*.py' 'ChordScope_Desktop_V2_0/tests/' -Force
+          if (!(Test-Path 'ChordScope_Desktop_V2_0/chordscope/analysis/dsp.py')) { throw 'Native DSP patch missing' }
+          if (!(Test-Path 'ChordScope_Desktop_V2_0/chordscope/runtime_smoke.py')) { throw 'Runtime smoke patch missing' }
           Select-String -Path 'ChordScope_Desktop_V2_0/chordscope/analysis/separation.py' -Pattern 'from demucs_infer.api import Separator' | Write-Host
+          Select-String -Path 'ChordScope_Desktop_V2_0/chordscope/analysis/audio.py' -Pattern 'from .dsp import load_audio' | Write-Host
 
       - name: Setup Python 3.11 x64
         uses: actions/setup-python@v5
@@ -106,12 +88,14 @@ jobs:
         working-directory: ChordScope_Desktop_V2_0
         run: python -m pip install -r requirements.txt
 
-      - name: Verify stable Demucs Separator API
+      - name: Verify dependency boundaries
         working-directory: ChordScope_Desktop_V2_0
         shell: pwsh
         run: |
-          python -c "from demucs_infer.api import Separator; s=Separator(model='demucs_unittest', device='cpu', shifts=0); print('Separator API OK ·', s.samplerate, 'Hz')"
+          python -c "from demucs_infer.api import Separator; s=Separator(model='demucs_unittest', device='cpu', shifts=0); print('Separator API OK', s.samplerate)"
           if ($LASTEXITCODE -ne 0) { throw 'demucs_infer.api.Separator unavailable' }
+          python -c "import av, librosa; print('PyAV', av.__version__, 'Librosa', librosa.__version__)"
+          if ($LASTEXITCODE -ne 0) { throw 'PyAV/Librosa dependency import failed' }
 
       - name: Install test tools
         working-directory: ChordScope_Desktop_V2_0
@@ -128,6 +112,13 @@ jobs:
           python self_test.py
           if ($LASTEXITCODE -ne 0) { throw 'Self test failed' }
 
+      - name: Source runtime audio smoke test
+        working-directory: ChordScope_Desktop_V2_0
+        shell: pwsh
+        run: |
+          python main.py --runtime-smoke-test
+          if ($LASTEXITCODE -ne 0) { throw 'Source runtime smoke test failed' }
+
       - name: Prepare offline models
         working-directory: ChordScope_Desktop_V2_0
         shell: pwsh
@@ -139,7 +130,7 @@ jobs:
           $demucs=(Get-ChildItem vendor_models/demucs -File | Measure-Object).Count
           if ($demucs -lt 5) { throw "Demucs offline repository incomplete: $demucs files" }
 
-      - name: Build ChordScope.exe with Nuitka
+      - name: Build ChordScope.exe v2.0.1 with Nuitka
         working-directory: ChordScope_Desktop_V2_0
         shell: pwsh
         run: |
@@ -152,9 +143,9 @@ jobs:
             --output-dir=dist `
             --output-filename=ChordScope.exe `
             --product-name=ChordScope `
-            --file-description='ChordScope Desktop - Music Analysis' `
-            --file-version=2.0.0.0 `
-            --product-version=2.0.0.0 `
+            --file-description='ChordScope Desktop 2.0.1 - Music Analysis' `
+            --file-version=2.0.1.0 `
+            --product-version=2.0.1.0 `
             --include-data-dir=chordscope/frontend=chordscope/frontend `
             --include-data-dir=chordscope/data=chordscope/data `
             --include-data-dir=vendor_models=vendor_models `
@@ -167,6 +158,7 @@ jobs:
             --include-package=demucs_infer `
             --include-package=librosa `
             --include-package=soundfile `
+            --include-package=av `
             --include-package=scipy `
             --include-package=torch `
             --include-package=torchaudio `
@@ -187,27 +179,55 @@ jobs:
           if ($f.Length -lt 10000000) { throw 'Executable is unexpectedly small' }
           Get-FileHash 'dist/ChordScope.exe' -Algorithm SHA256 | Format-List
 
-      - name: Create patched source archive
+      - name: Run packaged EXE runtime audio smoke test
+        working-directory: ChordScope_Desktop_V2_0
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          $marker = Join-Path (Get-Location) 'runtime_smoke_ok.json'
+          Remove-Item $marker -Force -ErrorAction SilentlyContinue
+          $env:CHORDSCOPE_SMOKE_MARKER = $marker
+          & '.\dist\ChordScope.exe' --runtime-smoke-test
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "Packaged EXE runtime smoke failed with exit code $code" }
+          if (!(Test-Path $marker)) { throw 'Packaged EXE did not write runtime smoke marker' }
+          $text = Get-Content $marker -Raw
+          Write-Host $text
+          if ($text -notmatch 'CHORDSCOPE_RUNTIME_SMOKE_OK') { throw 'Packaged EXE runtime smoke success marker missing' }
+          if ($text -notmatch 'librosa_external_cqt.*ok') { throw 'External Librosa CQT compatibility smoke missing' }
+          if ($text -notmatch 'pyav.*ok') { throw 'Packaged PyAV smoke missing' }
+
+      - name: Create compact patched source archive
         shell: pwsh
         run: |
-          Compress-Archive -Path 'ChordScope_Desktop_V2_0' -DestinationPath 'ChordScope_Desktop_V2_0_PATCHED_SOURCE.zip' -CompressionLevel Optimal -Force
-          $f=Get-Item 'ChordScope_Desktop_V2_0_PATCHED_SOURCE.zip'
+          $src='ChordScope_Desktop_V2_0'
+          $tmp='ChordScope_Desktop_V2_0_PATCHED_SOURCE'
+          Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          $exclude=@('vendor_models','dist','__pycache__','.pytest_cache')
+          Get-ChildItem $src -Force | Where-Object { $exclude -notcontains $_.Name } | ForEach-Object {
+            Copy-Item $_.FullName $tmp -Recurse -Force
+          }
+          Get-ChildItem $tmp -Recurse -Directory -Filter '__pycache__' | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          Get-ChildItem $tmp -Recurse -File -Filter '*.pyc' | Remove-Item -Force -ErrorAction SilentlyContinue
+          Compress-Archive -Path $tmp -DestinationPath 'ChordScope_Desktop_V2_0_1_PATCHED_SOURCE.zip' -CompressionLevel Optimal -Force
+          $f=Get-Item 'ChordScope_Desktop_V2_0_1_PATCHED_SOURCE.zip'
           Write-Host "Patched source ZIP: $([math]::Round($f.Length/1KB,1)) KB"
 
-      - name: Upload ChordScope.exe
+      - name: Upload ChordScope.exe v2.0.1
         uses: actions/upload-artifact@v4
         with:
-          name: ChordScope-Windows-x64
+          name: ChordScope-Windows-x64-v2.0.1
           path: ChordScope_Desktop_V2_0/dist/ChordScope.exe
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
 
-      - name: Upload patched source ZIP
+      - name: Upload compact patched source
         uses: actions/upload-artifact@v4
         with:
-          name: ChordScope-Source-Patched
-          path: ChordScope_Desktop_V2_0_PATCHED_SOURCE.zip
+          name: ChordScope-Source-v2.0.1
+          path: ChordScope_Desktop_V2_0_1_PATCHED_SOURCE.zip
           if-no-files-found: error
-          compression-level: 0
+          compression-level: 6
           retention-days: 30
