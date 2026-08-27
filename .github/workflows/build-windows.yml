@@ -27,7 +27,8 @@ jobs:
         shell: pwsh
         run: |
           if (!(Test-Path 'ChordScope_Desktop_V2_0_SOURCE.zip')) { throw 'Source archive missing' }
-          Expand-Archive -Path 'ChordScope_Desktop_V2_0_SOURCE.zip' -DestinationPath '.' -Force
+          tar -xf 'ChordScope_Desktop_V2_0_SOURCE.zip'
+          if ($LASTEXITCODE -ne 0) { throw "tar extraction failed with exit code $LASTEXITCODE" }
           if (!(Test-Path 'ChordScope_Desktop_V2_0/requirements.txt')) { throw 'Extracted project missing' }
 
       - name: Setup Python 3.11 x64
