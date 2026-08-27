@@ -70,13 +70,10 @@ jobs:
           }
 
           $listing = & tar -tf 'ChordScope_Desktop_V2_0_SOURCE.zip'
-          $listCode = $LASTEXITCODE
-          if ($listCode -ne 0) { throw "ZIP integrity listing failed with exit code $listCode" }
+          if ($LASTEXITCODE -ne 0) { throw "ZIP integrity listing failed" }
           $listing | Select-Object -First 12 | ForEach-Object { Write-Host $_ }
-
           & tar -xf 'ChordScope_Desktop_V2_0_SOURCE.zip'
-          $extractCode = $LASTEXITCODE
-          if ($extractCode -ne 0) { throw "ZIP extraction failed with exit code $extractCode" }
+          if ($LASTEXITCODE -ne 0) { throw "ZIP extraction failed" }
           if (!(Test-Path 'ChordScope_Desktop_V2_0/requirements.txt')) { throw 'Extracted project missing requirements.txt' }
           if (!(Test-Path 'ChordScope_Desktop_V2_0/chordscope/frontend/index.html')) { throw 'Extracted project missing frontend' }
 
@@ -88,7 +85,6 @@ jobs:
           Copy-Item 'patches/chordscope/analysis/separation.py' 'ChordScope_Desktop_V2_0/chordscope/analysis/separation.py' -Force
           Copy-Item 'patches/tests/test_separation.py' 'ChordScope_Desktop_V2_0/tests/test_separation.py' -Force
           Select-String -Path 'ChordScope_Desktop_V2_0/chordscope/analysis/separation.py' -Pattern 'from demucs_infer.api import Separator' | Write-Host
-          Select-String -Path 'ChordScope_Desktop_V2_0/prepare_models.py' -Pattern 'from demucs_infer.api import Separator' | Write-Host
 
       - name: Setup Python 3.11 x64
         uses: actions/setup-python@v5
@@ -165,7 +161,6 @@ jobs:
             --include-package-data=lv_chordia `
             --include-package-data=beat_this `
             --include-package-data=demucs_infer `
-            --include-package=transformers `
             --include-package=huggingface_hub `
             --include-package=lv_chordia `
             --include-package=beat_this `
@@ -175,6 +170,7 @@ jobs:
             --include-package=scipy `
             --include-package=torch `
             --include-package=torchaudio `
+            --nofollow-import-to=transformers.commands `
             --nofollow-import-to=matplotlib `
             --nofollow-import-to=pytest `
             --nofollow-import-to=IPython `
