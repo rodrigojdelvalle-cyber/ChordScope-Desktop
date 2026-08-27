@@ -30,10 +30,33 @@ jobs:
           $parts = Get-ChildItem 'source.part*.b64' | Sort-Object Name
           if ($parts.Count -ne 13) { throw "Expected 13 source parts, found $($parts.Count)" }
 
-          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
-          $b64 = [regex]::Replace($b64, '\s', '')
-          $bytes = [Convert]::FromBase64String($b64)
-          [IO.File]::WriteAllBytes('ChordScope_Desktop_V2_0_SOURCE.zip', $bytes)
+          $out = [IO.File]::Open('ChordScope_Desktop_V2_0_SOURCE.zip',[IO.FileMode]::Create)
+          try {
+            foreach ($part in $parts) {
+              $raw = Get-Content $part.FullName -Raw
+              $clean = [regex]::Replace($raw, '\s', '')
+              Write-Host "$($part.Name): raw=$($raw.Length), clean=$($clean.Length)"
+              if ($clean -notmatch '^[A-Za-z0-9+/]*={0,2}$') {
+                $bad = for ($i=0; $i -lt $clean.Length; $i++) {
+                  $ch = $clean[$i]
+                  if ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".IndexOf($ch) -lt 0) {
+                    "index=$i char=[$ch] code=$([int][char]$ch)"
+                    break
+                  }
+                }
+                throw "Invalid base64 character in $($part.Name): $bad"
+              }
+              if (($clean.Length % 4) -ne 0) { throw "Invalid base64 length in $($part.Name): $($clean.Length)" }
+              try {
+                $chunk = [Convert]::FromBase64String($clean)
+              } catch {
+                throw "Base64 decode failed in $($part.Name): $($_.Exception.Message)"
+              }
+              $out.Write($chunk,0,$chunk.Length)
+            }
+          } finally {
+            $out.Dispose()
+          }
 
           $zip = Get-Item 'ChordScope_Desktop_V2_0_SOURCE.zip'
           Write-Host "Reconstructed source ZIP: $($zip.Length) bytes"
