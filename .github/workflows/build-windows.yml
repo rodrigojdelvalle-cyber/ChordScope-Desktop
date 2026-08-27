@@ -68,10 +68,14 @@ jobs:
             throw "Source ZIP checksum mismatch"
           }
 
-          tar -tf 'ChordScope_Desktop_V2_0_SOURCE.zip' | Select-Object -First 12
-          if ($LASTEXITCODE -ne 0) { throw "ZIP integrity listing failed" }
-          tar -xf 'ChordScope_Desktop_V2_0_SOURCE.zip'
-          if ($LASTEXITCODE -ne 0) { throw "ZIP extraction failed" }
+          $listing = & tar -tf 'ChordScope_Desktop_V2_0_SOURCE.zip'
+          $listCode = $LASTEXITCODE
+          if ($listCode -ne 0) { throw "ZIP integrity listing failed with exit code $listCode" }
+          $listing | Select-Object -First 12 | ForEach-Object { Write-Host $_ }
+
+          & tar -xf 'ChordScope_Desktop_V2_0_SOURCE.zip'
+          $extractCode = $LASTEXITCODE
+          if ($extractCode -ne 0) { throw "ZIP extraction failed with exit code $extractCode" }
           if (!(Test-Path 'ChordScope_Desktop_V2_0/requirements.txt')) { throw 'Extracted project missing requirements.txt' }
           if (!(Test-Path 'ChordScope_Desktop_V2_0/chordscope/frontend/index.html')) { throw 'Extracted project missing frontend' }
 
