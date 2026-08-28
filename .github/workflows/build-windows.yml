@@ -98,6 +98,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'demucs_infer.api.Separator unavailable' }
           python -c "import av, librosa; print('PyAV', av.__version__, 'Librosa', librosa.__version__)"
           if ($LASTEXITCODE -ne 0) { throw 'PyAV/Librosa dependency import failed' }
+          python -c "from transformers import AutoModel; print('Transformers AutoModel OK')"
+          if ($LASTEXITCODE -ne 0) { throw 'Transformers AutoModel unavailable' }
 
       - name: Install test tools
         working-directory: ChordScope_Desktop_V2_0
@@ -164,7 +166,14 @@ jobs:
             --include-package=scipy `
             --include-package=torch `
             --include-package=torchaudio `
+            --include-package=transformers.models.auto `
+            --nofollow-import-to=transformers.models.* `
+            --nofollow-import-to=transformers.quantizers.* `
+            --nofollow-import-to=transformers.integrations.* `
             --nofollow-import-to=transformers.commands `
+            --nofollow-import-to=transformers.trainer* `
+            --nofollow-import-to=transformers.training_args* `
+            --nofollow-import-to=transformers.onnx.* `
             --nofollow-import-to=matplotlib `
             --nofollow-import-to=pytest `
             --nofollow-import-to=IPython `
