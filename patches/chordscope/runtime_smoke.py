@@ -22,6 +22,23 @@ def _write_marker(payload: dict) -> None:
         Path(marker).write_text(json.dumps(payload,ensure_ascii=False),encoding='utf-8')
 
 
+def _patch_librosa_util_exports() -> None:
+    """Restore public util exports that some lazy-loader/librosa combinations omit.
+
+    Librosa's internal sequence module imports these names from ``librosa.util``.
+    On the Windows CI environment the package imports successfully, but the lazy
+    package namespace can miss symbols that still exist in ``librosa.util.utils``.
+    Copying only missing public symbols is a narrow compatibility shim and keeps
+    the real Librosa CQT path exercised by the smoke test.
+    """
+    import librosa.util as util
+    from librosa.util import utils
+
+    for name in ('pad_center','fill_off_diagonal','is_positive_int','tiny','expand_to'):
+        if not hasattr(util,name):
+            setattr(util,name,getattr(utils,name))
+
+
 def run_runtime_smoke() -> int:
     # Librosa's CQT path uses Numba. Nuitka standalone/onefile explicitly warns
     # that Numba JIT is not fully supported, so force the supported no-JIT path
@@ -54,6 +71,7 @@ def run_runtime_smoke() -> int:
             import librosa
             ly,lsr=librosa.load(str(p),sr=22050,mono=True)
             assert len(ly)>10000 and lsr==22050
+            _patch_librosa_util_exports()
             from librosa.core.constantq import hybrid_cqt
             cqt=hybrid_cqt(ly[:sr*2],sr=lsr,hop_length=512,n_bins=36,bins_per_octave=12,tuning=0.0)
             assert cqt.shape[0]==36 and cqt.shape[1]>5
