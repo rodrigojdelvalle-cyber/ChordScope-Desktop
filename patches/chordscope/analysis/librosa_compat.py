@@ -1,10 +1,28 @@
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 import types
+from pathlib import Path
 
 import numpy as np
 from scipy import signal
+
+
+def _prepare_numba_runtime() -> None:
+    """Undo Nuitka's standalone no-JIT default before third-party Librosa imports.
+
+    Librosa 0.11 uses Numba guvectorize/stencil internals that do not import
+    correctly with NUMBA_DISABLE_JIT=1. ChordScope's own DSP does not depend on
+    Numba, but LV-Chordia/BTC still require Librosa CQT, so enable the normal
+    Numba path only at this compatibility boundary and give its cache a writable
+    per-user temporary directory.
+    """
+    os.environ.pop("NUMBA_DISABLE_JIT", None)
+    cache_dir = Path(tempfile.gettempdir()) / "ChordScopeNumbaCache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("NUMBA_CACHE_DIR", str(cache_dir))
 
 
 def _native_resample(y, *, orig_sr, target_sr, res_type="soxr_hq", fix=True, scale=False, axis=-1, **_kwargs):
@@ -39,8 +57,9 @@ def patch_third_party_librosa_loader() -> None:
     BTC still use Librosa CQT. The CQT module imports ``librosa.core.audio``
     for resampling, and that real module contains Numba JIT/stencil decorators
     that are fragile in onefile builds. Install a small native shim before CQT
-    imports occur.
+    imports occur, while leaving Numba enabled for Librosa's CQT utilities.
     """
+    _prepare_numba_runtime()
     import librosa
     from .audio import load_mono
 
