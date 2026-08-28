@@ -22,28 +22,14 @@ def _write_marker(payload: dict) -> None:
         Path(marker).write_text(json.dumps(payload,ensure_ascii=False),encoding='utf-8')
 
 
-def _patch_librosa_util_exports() -> None:
-    """Restore public util exports that some lazy-loader/librosa combinations omit.
-
-    Librosa's internal sequence module imports these names from ``librosa.util``.
-    On the Windows CI environment the package imports successfully, but the lazy
-    package namespace can miss symbols that still exist in ``librosa.util.utils``.
-    Copying only missing public symbols is a narrow compatibility shim and keeps
-    the real Librosa CQT path exercised by the smoke test.
-    """
-    import librosa.util as util
-    from librosa.util import utils
-
-    for name in ('pad_center','fill_off_diagonal','is_positive_int','tiny','expand_to'):
-        if not hasattr(util,name):
-            setattr(util,name,getattr(utils,name))
-
-
 def run_runtime_smoke() -> int:
-    # Librosa's CQT path uses Numba. Nuitka standalone/onefile explicitly warns
-    # that Numba JIT is not fully supported, so force the supported no-JIT path
-    # before librosa/numba are imported. The numerical implementation still runs.
-    os.environ.setdefault('NUMBA_DISABLE_JIT','1')
+    # Do not force NUMBA_DISABLE_JIT here. Librosa 0.11 imports Numba
+    # guvectorize/stencil utilities which are not valid when the global JIT
+    # switch is forced off. Nuitka is told explicitly to keep Numba JIT enabled.
+    # Give Numba a writable cache location for the onefile runtime.
+    numba_cache=Path(tempfile.gettempdir())/'ChordScopeNumbaCache'
+    numba_cache.mkdir(parents=True,exist_ok=True)
+    os.environ.setdefault('NUMBA_CACHE_DIR',str(numba_cache))
     try:
         from .analysis.audio import probe_audio,load_mono
         from .analysis.template_engine import extract_beat_features
@@ -71,7 +57,6 @@ def run_runtime_smoke() -> int:
             import librosa
             ly,lsr=librosa.load(str(p),sr=22050,mono=True)
             assert len(ly)>10000 and lsr==22050
-            _patch_librosa_util_exports()
             from librosa.core.constantq import hybrid_cqt
             cqt=hybrid_cqt(ly[:sr*2],sr=lsr,hop_length=512,n_bins=36,bins_per_octave=12,tuning=0.0)
             assert cqt.shape[0]==36 and cqt.shape[1]>5
@@ -82,7 +67,7 @@ def run_runtime_smoke() -> int:
             except Exception as exc:
                 raise RuntimeError(f'PyAV packaged import failed: {exc}') from exc
 
-            payload={'status':'CHORDSCOPE_RUNTIME_SMOKE_OK','bpm':round(float(bpm),2),'beats':len(bt),'features':len(feats),'decoder':'soundfile/native-dsp','librosa_external_cqt':'ok','pyav':av_status,'numba_jit':'disabled'}
+            payload={'status':'CHORDSCOPE_RUNTIME_SMOKE_OK','bpm':round(float(bpm),2),'beats':len(bt),'features':len(feats),'decoder':'soundfile/native-dsp','librosa_external_cqt':'ok','pyav':av_status,'numba_jit':'enabled'}
             _write_marker(payload)
             print(json.dumps(payload,ensure_ascii=False))
         return 0
