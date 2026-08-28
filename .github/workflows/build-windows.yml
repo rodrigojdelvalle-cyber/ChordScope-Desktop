@@ -158,6 +158,7 @@ jobs:
             --include-package-data=lv_chordia `
             --include-package-data=beat_this `
             --include-package-data=demucs_infer `
+            --include-package-data=librosa `
             --include-package=huggingface_hub `
             --include-package=lv_chordia `
             --include-package=beat_this `
