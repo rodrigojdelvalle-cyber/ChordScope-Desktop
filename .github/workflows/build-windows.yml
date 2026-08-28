@@ -198,8 +198,8 @@ jobs:
           $marker = Join-Path (Get-Location) 'runtime_smoke_ok.json'
           Remove-Item $marker -Force -ErrorAction SilentlyContinue
           $env:CHORDSCOPE_SMOKE_MARKER = $marker
-          & '.\dist\ChordScope.exe' --runtime-smoke-test
-          $code = $LASTEXITCODE
+          $proc = Start-Process -FilePath '.\dist\ChordScope.exe' -ArgumentList '--runtime-smoke-test' -Wait -PassThru
+          $code = $proc.ExitCode
           if ($code -ne 0) { throw "Packaged EXE runtime smoke failed with exit code $code" }
           if (!(Test-Path $marker)) { throw 'Packaged EXE did not write runtime smoke marker' }
           $text = Get-Content $marker -Raw
