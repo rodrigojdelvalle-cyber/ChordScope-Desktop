@@ -144,7 +144,7 @@ jobs:
             --enable-plugin=pyside6 `
             --windows-console-mode=disable `
             --assume-yes-for-downloads `
-            --module-parameter=numba-disable-jit=no `
+            --module-parameter=numba-disable-jit=yes `
             --module-parameter=torch-disable-jit=yes `
             --output-dir=dist `
             --output-filename=ChordScope.exe `
