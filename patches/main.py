@@ -8,16 +8,14 @@ def _patch_numba_onefile_cache() -> None:
 
     Nuitka compiles Python modules and extracts the application into a temporary
     onefile directory. Librosa 0.11 decorates several helpers with cache=True;
-    Numba then tries to create a cache locator from a source .py file that does
-    not exist as a normal source module in the compiled distribution and raises
-    ``RuntimeError: cannot cache function ... no locator available`` during
-    import. Disk caching is only a startup optimisation, so disabling the cache
-    is safe while preserving the JIT implementations Librosa expects.
+    Numba then tries to create cache locators from source .py files that are not
+    available as normal source modules in the compiled distribution. Disk
+    caching is only a startup optimisation, so disabling it is safe while
+    preserving the JIT/vectorized implementations Librosa expects.
     """
     if "__compiled__" not in globals():
         return
 
-    # Give any dependency that manages its own cache a stable writable location.
     import tempfile
     from pathlib import Path
 
@@ -35,13 +33,23 @@ def _patch_numba_onefile_cache() -> None:
         if hasattr(dispatcher, "Dispatcher"):
             dispatcher.Dispatcher.enable_caching = _no_disk_cache
 
-        # @vectorize / @guvectorize(..., cache=True), including the
-        # UFuncDispatcher used by Librosa's vectorized utility helpers.
+        # @vectorize / @guvectorize(..., cache=True).  For gufuncs the cache
+        # flag is also forwarded to build_gufunc_wrapper, so overriding only
+        # UFuncDispatcher.enable_caching is not sufficient.  Force the
+        # decorators to consume cache=True as cache=False before Librosa loads.
+        from numba.np.ufunc import decorators as ufunc_decorators
+
+        def _get_cache_disabled(cls, kwargs):
+            kwargs.pop("cache", False)
+            return False
+
+        ufunc_decorators._BaseVectorize.get_cache = classmethod(_get_cache_disabled)
+
+        # Defensive fallback for element-wise ufunc dispatchers.
         from numba.np.ufunc import ufuncbuilder
-        for name in ("UFuncDispatcher", "UFuncBuilder", "GUFuncBuilder"):
-            cls = getattr(ufuncbuilder, name, None)
-            if cls is not None and hasattr(cls, "enable_caching"):
-                cls.enable_caching = _no_disk_cache
+        cls = getattr(ufuncbuilder, "UFuncDispatcher", None)
+        if cls is not None and hasattr(cls, "enable_caching"):
+            cls.enable_caching = _no_disk_cache
     except Exception:
         # Do not make application startup depend on this compatibility shim.
         # The runtime smoke test will still catch any real packaged failure.
