@@ -35,9 +35,10 @@ def _patch_numba_onefile_cache() -> None:
         if hasattr(dispatcher, "Dispatcher"):
             dispatcher.Dispatcher.enable_caching = _no_disk_cache
 
-        # @vectorize / @guvectorize(..., cache=True), used by Librosa utilities.
+        # @vectorize / @guvectorize(..., cache=True), including the
+        # UFuncDispatcher used by Librosa's vectorized utility helpers.
         from numba.np.ufunc import ufuncbuilder
-        for name in ("UFuncBuilder", "GUFuncBuilder"):
+        for name in ("UFuncDispatcher", "UFuncBuilder", "GUFuncBuilder"):
             cls = getattr(ufuncbuilder, name, None)
             if cls is not None and hasattr(cls, "enable_caching"):
                 cls.enable_caching = _no_disk_cache
