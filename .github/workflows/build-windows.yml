@@ -144,6 +144,7 @@ jobs:
             --enable-plugin=pyside6 `
             --windows-console-mode=disable `
             --assume-yes-for-downloads `
+            --no-prefer-source-code `
             --module-parameter=numba-disable-jit=yes `
             --module-parameter=torch-disable-jit=yes `
             --output-dir=dist `
