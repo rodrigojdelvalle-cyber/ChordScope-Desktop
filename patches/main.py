@@ -4,14 +4,19 @@ import sys
 
 
 def _patch_numba_onefile_cache() -> None:
-    """Keep Numba JIT enabled but disable disk caching in Nuitka onefile builds.
+    """Apply narrow Numba/Librosa compatibility shims for Nuitka onefile builds.
 
     Nuitka compiles Python modules and extracts the application into a temporary
-    onefile directory. Librosa 0.11 decorates several helpers with cache=True;
-    Numba then tries to create cache locators from source .py files that are not
-    available as normal source modules in the compiled distribution. Disk
-    caching is only a startup optimisation, so disabling it is safe while
-    preserving the JIT/vectorized implementations Librosa expects.
+    onefile directory. Librosa 0.11 decorates several helpers with Numba. Disk
+    caching is only a startup optimisation, so it can be disabled safely.
+
+    In addition, Numba's DUFunc for librosa.util.utils._phasor_angles can reach
+    compiled-function bytecode that is not executable from a Nuitka onefile
+    payload (RuntimeError: "Compiled function bytecode used").  The helper is
+    mathematically just cos(x) + 1j*sin(x), so for packaged builds only we
+    replace that single implementation with its NumPy equivalent.  This keeps
+    Librosa's public phasor/CQT behaviour intact without weakening normal source
+    execution.
     """
     if "__compiled__" not in globals():
         return
@@ -29,14 +34,9 @@ def _patch_numba_onefile_cache() -> None:
         def _no_disk_cache(self):
             return None
 
-        # @jit(..., cache=True) / @njit(..., cache=True)
         if hasattr(dispatcher, "Dispatcher"):
             dispatcher.Dispatcher.enable_caching = _no_disk_cache
 
-        # @vectorize / @guvectorize(..., cache=True).  For gufuncs the cache
-        # flag is also forwarded to build_gufunc_wrapper, so overriding only
-        # UFuncDispatcher.enable_caching is not sufficient.  Force the
-        # decorators to consume cache=True as cache=False before Librosa loads.
         from numba.np.ufunc import decorators as ufunc_decorators
 
         def _get_cache_disabled(cls, kwargs):
@@ -45,14 +45,25 @@ def _patch_numba_onefile_cache() -> None:
 
         ufunc_decorators._BaseVectorize.get_cache = classmethod(_get_cache_disabled)
 
-        # Defensive fallback for element-wise ufunc dispatchers.
         from numba.np.ufunc import ufuncbuilder
         cls = getattr(ufuncbuilder, "UFuncDispatcher", None)
         if cls is not None and hasattr(cls, "enable_caching"):
             cls.enable_caching = _no_disk_cache
     except Exception:
-        # Do not make application startup depend on this compatibility shim.
-        # The runtime smoke test will still catch any real packaged failure.
+        # The runtime smoke test below remains the authoritative verification.
+        pass
+
+    try:
+        import numpy as np
+        import librosa.util.utils as librosa_utils
+
+        def _phasor_angles_numpy(x):
+            x_arr = np.asarray(x)
+            return np.cos(x_arr) + 1j * np.sin(x_arr)
+
+        librosa_utils._phasor_angles = _phasor_angles_numpy
+    except Exception:
+        # Do not mask import/startup failures; packaged smoke will report them.
         pass
 
 
