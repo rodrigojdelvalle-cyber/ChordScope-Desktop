@@ -50,6 +50,34 @@ def _native_to_mono(y):
     return np.mean(x, axis=tuple(range(x.ndim - 1)))
 
 
+def _patch_constantq_numba_helper() -> None:
+    """Replace Librosa's tiny JIT helper with pure Python in compiled builds.
+
+    Nuitka onefile compiles the Python body wrapped by Numba's CPUDispatcher.
+    Numba then attempts to inspect CPython bytecode for that already-compiled
+    function and raises ``RuntimeError: Compiled function bytecode used``.
+    The helper only counts powers of two, so an equivalent pure-Python function
+    avoids that unsupported boundary without changing CQT mathematics.
+    """
+    try:
+        from librosa.core import constantq
+
+        def _num_two_factors(x):
+            value = int(x)
+            if value <= 0:
+                return 0
+            count = 0
+            while value % 2 == 0:
+                count += 1
+                value //= 2
+            return count
+
+        constantq.__dict__["__num_two_factors"] = _num_two_factors
+    except Exception:
+        # The runtime smoke test validates this compatibility path end-to-end.
+        pass
+
+
 def patch_third_party_librosa_loader() -> None:
     """Make Librosa usable by bundled third-party chord engines under Nuitka.
 
@@ -108,3 +136,5 @@ def patch_third_party_librosa_loader() -> None:
         core.__dict__["audio"] = stub
         core.__dict__["load"] = _load
         core.__dict__["resample"] = _native_resample
+
+    _patch_constantq_numba_helper()
