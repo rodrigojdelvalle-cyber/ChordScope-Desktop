@@ -166,7 +166,6 @@ jobs:
             --include-package=demucs_infer `
             --include-package=librosa `
             --include-package=soundfile `
-            --include-package=av `
             --include-package=scipy `
             --include-package=torch `
             --include-package=torchaudio `
