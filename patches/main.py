@@ -50,7 +50,6 @@ def _patch_numba_onefile_cache() -> None:
         if cls is not None and hasattr(cls, "enable_caching"):
             cls.enable_caching = _no_disk_cache
     except Exception:
-        # The runtime smoke test below remains the authoritative verification.
         pass
 
     try:
@@ -63,15 +62,26 @@ def _patch_numba_onefile_cache() -> None:
 
         librosa_utils._phasor_angles = _phasor_angles_numpy
     except Exception:
-        # Do not mask import/startup failures; packaged smoke will report them.
         pass
 
 
 _patch_numba_onefile_cache()
 
+if __name__ == "__main__" and "--btc-worker" in sys.argv:
+    from chordscope.analysis.chord_btc import run_btc_worker
+    i = sys.argv.index("--btc-worker")
+    args = sys.argv[i + 1:i + 5]
+    if len(args) != 4:
+        raise SystemExit(64)
+    raise SystemExit(run_btc_worker(*args))
+
 if __name__ == "__main__" and "--runtime-smoke-test" in sys.argv:
     from chordscope.runtime_smoke import run_runtime_smoke
     raise SystemExit(run_runtime_smoke())
+
+if __name__ == "__main__" and "--full-runtime-smoke-test" in sys.argv:
+    from chordscope.full_runtime_smoke import run_full_runtime_smoke
+    raise SystemExit(run_full_runtime_smoke())
 
 from chordscope.app import run
 
