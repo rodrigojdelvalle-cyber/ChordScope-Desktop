@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json, os, tempfile, traceback, wave
 from pathlib import Path
+from .analysis.resources import build_variant
 import numpy as np
 
 
@@ -23,10 +24,6 @@ def _write_marker(payload: dict) -> None:
 
 
 def run_runtime_smoke() -> int:
-    # Do not force NUMBA_DISABLE_JIT here. Librosa 0.11 imports Numba
-    # guvectorize/stencil utilities which are not valid when the global JIT
-    # switch is forced off. Nuitka is told explicitly to keep Numba JIT enabled.
-    # Give Numba a writable cache location for the onefile runtime.
     numba_cache=Path(tempfile.gettempdir())/'ChordScopeNumbaCache'
     numba_cache.mkdir(parents=True,exist_ok=True)
     os.environ.setdefault('NUMBA_CACHE_DIR',str(numba_cache))
@@ -67,7 +64,21 @@ def run_runtime_smoke() -> int:
             except Exception as exc:
                 raise RuntimeError(f'PyAV packaged import failed: {exc}') from exc
 
-            payload={'status':'CHORDSCOPE_RUNTIME_SMOKE_OK','bpm':round(float(bpm),2),'beats':len(bt),'features':len(feats),'decoder':'soundfile/native-dsp','librosa_external_cqt':'ok','pyav':av_status,'numba_jit':'enabled'}
+            import torch
+            payload={
+                'status':'CHORDSCOPE_RUNTIME_SMOKE_OK',
+                'bpm':round(float(bpm),2),
+                'beats':len(bt),
+                'features':len(feats),
+                'decoder':'soundfile/native-dsp',
+                'librosa_external_cqt':'ok',
+                'pyav':av_status,
+                'numba_jit':'enabled',
+                'torch':str(torch.__version__),
+                'torch_cuda_build':torch.version.cuda,
+                'cuda_available':bool(torch.cuda.is_available()),
+                'build_variant':build_variant(),
+            }
             _write_marker(payload)
             print(json.dumps(payload,ensure_ascii=False))
         return 0
@@ -79,9 +90,6 @@ def run_runtime_smoke() -> int:
             'traceback':traceback.format_exc(),
         }
         _write_marker(payload)
-        # In packaged CI mode stdout/stderr are disabled by windows-console-mode=disable.
-        # Return 0 only when a marker path is supplied so the workflow can read and print
-        # the diagnostic marker, then fail on the missing success signature.
         if os.environ.get('CHORDSCOPE_SMOKE_MARKER'):
             return 0
         print(json.dumps(payload,ensure_ascii=False))
