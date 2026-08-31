@@ -21,6 +21,7 @@ def prepare_btc():
     target.mkdir(parents=True, exist_ok=True)
     snapshot_download(
         repo_id="puar-playground/btc-chord",
+        revision="d436f2f664f5107cd987774279b8ce171846e376",
         local_dir=str(target),
         local_dir_use_symlinks=False,
         allow_patterns=[
@@ -78,8 +79,6 @@ def prepare_demucs():
     target = MODELS / "demucs"
     target.mkdir(parents=True, exist_ok=True)
 
-    # htdemucs_ft is the official four-model fine-tuned ensemble. A local
-    # Demucs repository consists of this bag YAML plus its four checkpoints.
     (target / "htdemucs_ft.yaml").write_text(
         "models: ['f7e0c4bc', 'd12395a8', '92cfc3b6', '04573f0d']\n"
         "weights:\n"
@@ -100,8 +99,6 @@ def prepare_demucs():
     for name in files:
         _download_verified(root + name, target / name)
 
-    # Validate the exact stable API used by ChordScope. Loading the local bag
-    # proves that all required weights resolve without Internet.
     sep = Separator(model="htdemucs_ft", repo=target, device="cpu", shifts=0, progress=False)
     if int(sep.samplerate) != 44100:
         raise RuntimeError(f"Samplerate Demucs inesperado: {sep.samplerate}")
