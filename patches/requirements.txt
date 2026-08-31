@@ -12,7 +12,6 @@ torchaudio>=2.3
 beat-this>=1.1.0
 demucs-infer==4.2.2
 lv-chordia==1.1.0
-transformers>=4.45,<5
 huggingface-hub>=0.26
 einops>=0.8
 rotary-embedding-torch>=0.8
