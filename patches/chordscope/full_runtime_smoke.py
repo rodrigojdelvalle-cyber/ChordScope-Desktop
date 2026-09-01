@@ -28,7 +28,7 @@ def _fixture(path: Path, sr: int = 22050, duration: float = 4.0) -> None:
         i = int(bt * sr)
         m = min(n - i, int(0.02 * sr))
         if m > 0:
-            y[i:i+m] += 0.28 * np.hanning(m)
+            y[i:i + m] += 0.28 * np.hanning(m)
     pcm = (np.clip(y, -0.95, 0.95) * 32767).astype("<i2")
     with wave.open(str(path), "wb") as w:
         w.setnchannels(1)
@@ -39,8 +39,12 @@ def _fixture(path: Path, sr: int = 22050, duration: float = 4.0) -> None:
 
 def _marker(payload: dict) -> None:
     target = os.environ.get("CHORDSCOPE_FULL_SMOKE_MARKER")
-    if target:
-        Path(target).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    if not target:
+        return
+    path = Path(target)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
 
 
 def _timed(name: str, fn, timings: dict):
@@ -52,6 +56,26 @@ def _timed(name: str, fn, timings: dict):
 
 def run_full_runtime_smoke() -> int:
     timings: dict[str, float] = {}
+    state = {
+        "status": "CHORDSCOPE_FULL_ML_RUNTIME_SMOKE_RUNNING",
+        "version": "2.0.2",
+        "build_variant": build_variant(),
+        "stage": "initializing",
+        "demucs_model": "pending",
+        "beat_this_model": "pending",
+        "lv_chordia_model": "pending",
+        "btc_model": "pending",
+        "btc_isolation": "pending",
+        "timings": timings,
+    }
+
+    def mark(stage: str, **updates) -> None:
+        state["stage"] = stage
+        state.update(updates)
+        state["timings"] = dict(timings)
+        _marker(state)
+
+    mark("verifying_offline_models")
     try:
         root = models_root()
         required = {
@@ -71,6 +95,7 @@ def run_full_runtime_smoke() -> int:
             from .analysis.separation import SourceSeparator
             separator = SourceSeparator(device="cpu")
             try:
+                mark("demucs_loading")
                 sep = _timed(
                     "demucs_seconds",
                     lambda: separator.separate(audio, use_demucs=True, shifts=0),
@@ -80,8 +105,10 @@ def run_full_runtime_smoke() -> int:
                     raise RuntimeError(f"Demucs cayó a fallback: {sep.engine}")
                 if not sep.harmony.exists() or not sep.bass.exists():
                     raise RuntimeError("Demucs no produjo stems requeridos")
+                mark("demucs_ok", demucs_model="ok")
 
                 from .analysis.beat_tracker import detect_beats
+                mark("beat_this_loading")
                 beat = _timed(
                     "beat_this_seconds",
                     lambda: detect_beats(audio, 4.0, prefer_model=True),
@@ -89,8 +116,10 @@ def run_full_runtime_smoke() -> int:
                 )
                 if not str(beat.get("engine", "")).startswith("Beat This"):
                     raise RuntimeError(f"Beat This cayó a fallback: {beat.get('engine')}")
+                mark("beat_this_ok", beat_this_model="ok")
 
                 from .analysis.chord_lv import LVChordiaEngine
+                mark("lv_chordia_loading")
                 lv = LVChordiaEngine(device="cpu")
                 lv_out = _timed(
                     "lv_chordia_seconds",
@@ -99,24 +128,42 @@ def run_full_runtime_smoke() -> int:
                 )
                 if "submission" not in lv_out:
                     raise RuntimeError("LV-Chordia no devolvió la salida submission")
+                mark("lv_chordia_ok", lv_chordia_model="ok")
 
+                # Validate BTC inference directly inside the packaged runtime first.
+                # This separates model/package correctness from subprocess lifecycle.
                 from .analysis.chord_btc import BTCChordEngine
+                mark("btc_direct_loading")
                 btc = BTCChordEngine(device="cpu")
                 btc_out = _timed(
-                    "btc_seconds",
-                    lambda: btc.analyze(sep.harmony, timeout_seconds=150, isolated=True),
+                    "btc_direct_seconds",
+                    lambda: btc.analyze(sep.harmony, timeout_seconds=0, isolated=False),
                     timings,
                 )
                 if btc_out is None:
-                    raise RuntimeError("BTC no devolvió salida")
+                    raise RuntimeError("BTC directo no devolvió salida")
+                mark("btc_direct_ok", btc_model="ok")
+
+                # Also validate the production isolation boundary used by the app.
+                # It receives a separate timeout so a child-process failure is explicit.
+                mark("btc_isolated_loading")
+                btc_isolated = BTCChordEngine(device="cpu")
+                btc_isolated_out = _timed(
+                    "btc_isolated_seconds",
+                    lambda: btc_isolated.analyze(sep.harmony, timeout_seconds=150, isolated=True),
+                    timings,
+                )
+                if btc_isolated_out is None:
+                    raise RuntimeError("BTC aislado no devolvió salida")
+                mark("btc_isolated_ok", btc_isolation="ok")
             finally:
                 separator.close()
 
         import torch
-        payload = {
+        payload = dict(state)
+        payload.update({
             "status": "CHORDSCOPE_FULL_ML_RUNTIME_SMOKE_OK",
-            "version": "2.0.2",
-            "build_variant": build_variant(),
+            "stage": "complete",
             "torch": str(torch.__version__),
             "torch_cuda_build": torch.version.cuda,
             "cuda_available_on_runner": bool(torch.cuda.is_available()),
@@ -124,21 +171,21 @@ def run_full_runtime_smoke() -> int:
             "beat_this_model": "ok",
             "lv_chordia_model": "ok",
             "btc_model": "ok",
-            "timings": timings,
-        }
+            "btc_isolation": "ok",
+            "timings": dict(timings),
+        })
         _marker(payload)
         print(json.dumps(payload, ensure_ascii=False))
         return 0
     except Exception as exc:
-        payload = {
+        payload = dict(state)
+        payload.update({
             "status": "CHORDSCOPE_FULL_ML_RUNTIME_SMOKE_FAILED",
-            "version": "2.0.2",
-            "build_variant": build_variant(),
             "error_type": type(exc).__name__,
             "error": str(exc),
-            "timings": timings,
+            "timings": dict(timings),
             "traceback": traceback.format_exc(),
-        }
+        })
         _marker(payload)
         print(json.dumps(payload, ensure_ascii=False))
         return 1
