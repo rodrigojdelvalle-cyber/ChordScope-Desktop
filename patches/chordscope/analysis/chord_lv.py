@@ -55,7 +55,12 @@ class LVChordiaEngine:
             for idx,vocabulary in enumerate(vocabularies):
                 check_cancel(cancel_event)
                 if progress: progress(35+int(55*idx/max(1,len(vocabularies))),f"{self.name} legacy · {vocabulary}")
-                results=chord_recognition(audio_path=str(audio_path),chord_dict_name=vocabulary,device=self.device)
+                try:
+                    results=chord_recognition(audio_path=str(audio_path),chord_dict_name=vocabulary,device=self.device)
+                except TypeError as exc:
+                    if "unexpected keyword argument 'device'" not in str(exc):
+                        raise
+                    results=chord_recognition(audio_path=str(audio_path),chord_dict_name=vocabulary)
                 check_cancel(cancel_event)
                 outputs[vocabulary]=self._convert(results,vocabulary)
             if progress: progress(100,f"{self.name} legacy listo")
