@@ -1,28 +1,75 @@
 from __future__ import annotations
+import json
 import os
 import sys
+import traceback
+from pathlib import Path
+
+
+def _bootstrap_marker(env_name: str, payload: dict) -> None:
+    """Write a diagnostic as early as possible, before optional runtime imports."""
+    target = os.environ.get(env_name)
+    if not target:
+        return
+    try:
+        Path(target).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _run_packaged_smoke(flag: str, env_name: str, module_name: str, func_name: str) -> None:
+    """Dispatch CI smoke modes before normal startup shims can interfere.
+
+    The v2.0.2 #50 packaged binaries exited before their normal smoke marker was
+    produced. Keeping this dispatcher at the very top makes bootstrap/import
+    failures observable and also prevents application/UI startup from being
+    reached accidentally during CI validation.
+    """
+    if __name__ != "__main__" or flag not in sys.argv:
+        return
+    _bootstrap_marker(env_name, {
+        "status": "CHORDSCOPE_PACKAGED_SMOKE_BOOTSTRAP",
+        "flag": flag,
+        "argv": list(sys.argv),
+        "compiled": "__compiled__" in globals(),
+    })
+    try:
+        module = __import__(module_name, fromlist=[func_name])
+        func = getattr(module, func_name)
+        raise SystemExit(func())
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        _bootstrap_marker(env_name, {
+            "status": "CHORDSCOPE_PACKAGED_SMOKE_BOOTSTRAP_FAILED",
+            "flag": flag,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        })
+        raise SystemExit(1)
+
+
+_run_packaged_smoke(
+    "--runtime-smoke-test",
+    "CHORDSCOPE_SMOKE_MARKER",
+    "chordscope.runtime_smoke",
+    "run_runtime_smoke",
+)
+_run_packaged_smoke(
+    "--full-runtime-smoke-test",
+    "CHORDSCOPE_FULL_SMOKE_MARKER",
+    "chordscope.full_runtime_smoke",
+    "run_full_runtime_smoke",
+)
 
 
 def _patch_numba_onefile_cache() -> None:
-    """Apply narrow Numba/Librosa compatibility shims for Nuitka onefile builds.
-
-    Nuitka compiles Python modules and extracts the application into a temporary
-    onefile directory. Librosa 0.11 decorates several helpers with Numba. Disk
-    caching is only a startup optimisation, so it can be disabled safely.
-
-    In addition, Numba's DUFunc for librosa.util.utils._phasor_angles can reach
-    compiled-function bytecode that is not executable from a Nuitka onefile
-    payload (RuntimeError: "Compiled function bytecode used").  The helper is
-    mathematically just cos(x) + 1j*sin(x), so for packaged builds only we
-    replace that single implementation with its NumPy equivalent.  This keeps
-    Librosa's public phasor/CQT behaviour intact without weakening normal source
-    execution.
-    """
+    """Apply narrow Numba/Librosa compatibility shims for Nuitka packaged builds."""
     if "__compiled__" not in globals():
         return
 
     import tempfile
-    from pathlib import Path
 
     cache_dir = Path(tempfile.gettempdir()) / "ChordScopeNumbaCache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -74,14 +121,6 @@ if __name__ == "__main__" and "--btc-worker" in sys.argv:
     if len(args) != 4:
         raise SystemExit(64)
     raise SystemExit(run_btc_worker(*args))
-
-if __name__ == "__main__" and "--runtime-smoke-test" in sys.argv:
-    from chordscope.runtime_smoke import run_runtime_smoke
-    raise SystemExit(run_runtime_smoke())
-
-if __name__ == "__main__" and "--full-runtime-smoke-test" in sys.argv:
-    from chordscope.full_runtime_smoke import run_full_runtime_smoke
-    raise SystemExit(run_full_runtime_smoke())
 
 from chordscope.app import run
 
