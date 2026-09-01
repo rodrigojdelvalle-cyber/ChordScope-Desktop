@@ -138,8 +138,12 @@ jobs:
         shell: pwsh
         timeout-minutes: 35
         run: |
+          $marker = Join-Path (Get-Location) 'full_source_smoke.json'
+          $env:CHORDSCOPE_FULL_SMOKE_MARKER = $marker
           python main.py --full-runtime-smoke-test
-          if ($LASTEXITCODE -ne 0) { throw 'Full source ML smoke test failed' }
+          $code=$LASTEXITCODE
+          if (Test-Path $marker) { Get-Content $marker -Raw | Write-Host }
+          if ($code -ne 0) { throw 'Full source ML smoke test failed' }
 
       - name: Create shared offline-model bundle
         shell: pwsh
@@ -190,7 +194,7 @@ jobs:
     name: Build ${{ matrix.label }}
     needs: prepare-models
     runs-on: windows-2022
-    timeout-minutes: 360
+    timeout-minutes: 420
     strategy:
       fail-fast: false
       matrix:
@@ -200,11 +204,13 @@ jobs:
             torch_index: https://download.pytorch.org/whl/cpu
             exe_name: ChordScope-CPU.exe
             artifact_name: ChordScope-Windows-x64-CPU-v2.0.2
+            package_mode: onefile
           - variant: nvidia-cuda
             label: NVIDIA CUDA
             torch_index: https://download.pytorch.org/whl/cu126
             exe_name: ChordScope-NVIDIA-CUDA.exe
             artifact_name: ChordScope-Windows-x64-NVIDIA-CUDA-v2.0.2
+            package_mode: standalone
     env:
       PYTHONUTF8: '1'
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
@@ -310,75 +316,92 @@ jobs:
           python main.py --runtime-smoke-test
           if ($LASTEXITCODE -ne 0) { throw 'Source runtime smoke test failed for build environment' }
 
+      - name: Restore Nuitka compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/Nuitka/Nuitka/Cache
+          key: nuitka-${{ runner.os }}-py311-${{ matrix.variant }}-${{ hashFiles('patches/**', 'source.part*.b64') }}
+          restore-keys: |
+            nuitka-${{ runner.os }}-py311-${{ matrix.variant }}-
+
       - name: Build ChordScope v2.0.2 ${{ matrix.label }} with Nuitka
         working-directory: ChordScope_Desktop_V2_0
         shell: pwsh
-        timeout-minutes: 240
+        timeout-minutes: 300
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          python -m nuitka `
-            --mode=onefile `
-            --enable-plugin=pyside6 `
-            --windows-console-mode=disable `
-            --assume-yes-for-downloads `
-            --no-prefer-source-code `
-            --module-parameter=numba-disable-jit=yes `
-            --module-parameter=torch-disable-jit=yes `
-            --output-dir=dist `
-            --output-filename='${{ matrix.exe_name }}' `
-            --product-name=ChordScope `
-            --file-description='ChordScope Desktop 2.0.2 - ${{ matrix.label }}' `
-            --file-version=2.0.2.0 `
-            --product-version=2.0.2.0 `
-            --include-data-dir=chordscope/frontend=chordscope/frontend `
-            --include-data-dir=chordscope/data=chordscope/data `
-            --include-data-dir=vendor_models=vendor_models `
-            --include-package-data=lv_chordia `
-            --include-package-data=beat_this `
-            --include-package-data=demucs_infer `
-            --include-package-data=librosa `
-            --include-package=btc_src `
-            --include-package=lv_chordia `
-            --include-package=beat_this `
-            --include-package=demucs_infer `
-            --include-package=librosa `
-            --include-package=soundfile `
-            --include-package=scipy `
-            --include-package=torch `
-            --include-package=torchaudio `
-            --nofollow-import-to=matplotlib `
-            --nofollow-import-to=pytest `
-            --nofollow-import-to=IPython `
-            main.py
+          $args = @(
+            '--mode=${{ matrix.package_mode }}',
+            '--enable-plugin=pyside6',
+            '--windows-console-mode=disable',
+            '--assume-yes-for-downloads',
+            '--no-prefer-source-code',
+            '--module-parameter=numba-disable-jit=yes',
+            '--module-parameter=torch-disable-jit=yes',
+            '--output-dir=dist',
+            '--output-filename=${{ matrix.exe_name }}',
+            '--product-name=ChordScope',
+            '--file-description=ChordScope Desktop 2.0.2 - ${{ matrix.label }}',
+            '--file-version=2.0.2.0',
+            '--product-version=2.0.2.0',
+            '--include-data-dir=chordscope/frontend=chordscope/frontend',
+            '--include-data-dir=chordscope/data=chordscope/data',
+            '--include-data-dir=vendor_models=vendor_models',
+            '--include-package-data=lv_chordia',
+            '--include-package-data=beat_this',
+            '--include-package-data=demucs_infer',
+            '--include-package-data=librosa',
+            '--include-package=btc_src',
+            '--include-package=lv_chordia',
+            '--include-package=beat_this',
+            '--include-package=demucs_infer',
+            '--include-package=librosa',
+            '--include-package=soundfile',
+            '--include-package=scipy',
+            '--include-package=torch',
+            '--include-package=torchaudio',
+            '--nofollow-import-to=matplotlib',
+            '--nofollow-import-to=pytest',
+            '--nofollow-import-to=IPython',
+            '--nofollow-import-to=torch.testing.*',
+            '--report=dist/nuitka-${{ matrix.variant }}.xml'
+          )
+          python -m nuitka @args main.py
           if ($LASTEXITCODE -ne 0) { throw "Nuitka failed with exit code $LASTEXITCODE" }
 
-      - name: Verify executable + SHA-256
+      - name: Locate executable + SHA-256
         working-directory: ChordScope_Desktop_V2_0
         shell: pwsh
         run: |
-          $exe='dist/${{ matrix.exe_name }}'
-          if (!(Test-Path $exe)) { throw '${{ matrix.exe_name }} was not produced' }
-          $f=Get-Item $exe
-          Write-Host "$($f.Name) size: $([math]::Round($f.Length/1MB,1)) MB"
-          if ($f.Length -lt 10000000) { throw 'Executable is unexpectedly small' }
-          $hash=(Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
-          "$hash *${{ matrix.exe_name }}" | Set-Content -Encoding ascii 'dist/${{ matrix.exe_name }}.sha256.txt'
+          $matches = @(Get-ChildItem 'dist' -Recurse -File -Filter '${{ matrix.exe_name }}')
+          if ($matches.Count -lt 1) { throw '${{ matrix.exe_name }} was not produced' }
+          $exe = $matches | Sort-Object FullName | Select-Object -First 1
+          Write-Host "Executable: $($exe.FullName)"
+          Write-Host "Size: $([math]::Round($exe.Length/1MB,1)) MB"
+          if ($exe.Length -lt 10000000) { throw 'Executable is unexpectedly small' }
+          $hash=(Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          $shaPath=Join-Path $exe.Directory.FullName ($exe.Name + '.sha256.txt')
+          "$hash *$($exe.Name)" | Set-Content -Encoding ascii $shaPath
           Write-Host "SHA256: $hash"
+          "CHORDSCOPE_EXE_PATH=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CHORDSCOPE_EXE_DIR=$($exe.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CHORDSCOPE_SHA_PATH=$shaPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Packaged basic runtime audio/UI smoke test
         working-directory: ChordScope_Desktop_V2_0
         shell: pwsh
-        timeout-minutes: 20
+        timeout-minutes: 25
         run: |
           $marker = Join-Path (Get-Location) 'runtime_smoke_ok.json'
           Remove-Item $marker -Force -ErrorAction SilentlyContinue
           $env:CHORDSCOPE_SMOKE_MARKER = $marker
           $env:CHORDSCOPE_BUILD_VARIANT = '${{ matrix.variant }}'
-          $proc = Start-Process -FilePath '.\dist\${{ matrix.exe_name }}' -ArgumentList '--runtime-smoke-test' -Wait -PassThru
-          if ($proc.ExitCode -ne 0) { throw "Packaged basic smoke failed with exit code $($proc.ExitCode)" }
-          if (!(Test-Path $marker)) { throw 'Packaged EXE did not write basic smoke marker' }
-          $j = Get-Content $marker -Raw | ConvertFrom-Json
-          $j | ConvertTo-Json -Depth 8 | Write-Host
+          $proc = Start-Process -FilePath $env:CHORDSCOPE_EXE_PATH -ArgumentList '--runtime-smoke-test' -Wait -PassThru
+          $code=$proc.ExitCode
+          if (Test-Path $marker) { $text=Get-Content $marker -Raw; Write-Host $text } else { $text='' }
+          if ($code -ne 0) { throw "Packaged basic smoke failed with exit code $code" }
+          if (!(Test-Path $marker)) { throw 'Packaged executable did not write basic smoke marker' }
+          $j = $text | ConvertFrom-Json
           if ($j.status -ne 'CHORDSCOPE_RUNTIME_SMOKE_OK') { throw "Basic smoke status: $($j.status)" }
           if ($j.librosa_external_cqt -ne 'ok') { throw 'External Librosa CQT compatibility smoke missing' }
           if ($j.pyav -notlike 'ok:*') { throw 'Packaged PyAV smoke missing' }
@@ -389,32 +412,77 @@ jobs:
       - name: Packaged full ML smoke test
         working-directory: ChordScope_Desktop_V2_0
         shell: pwsh
-        timeout-minutes: 45
+        timeout-minutes: 55
         run: |
           $marker = Join-Path (Get-Location) 'full_runtime_smoke_ok.json'
           Remove-Item $marker -Force -ErrorAction SilentlyContinue
           $env:CHORDSCOPE_FULL_SMOKE_MARKER = $marker
           $env:CHORDSCOPE_BUILD_VARIANT = '${{ matrix.variant }}'
-          $proc = Start-Process -FilePath '.\dist\${{ matrix.exe_name }}' -ArgumentList '--full-runtime-smoke-test' -Wait -PassThru
-          if ($proc.ExitCode -ne 0) { throw "Packaged full ML smoke failed with exit code $($proc.ExitCode)" }
-          if (!(Test-Path $marker)) { throw 'Packaged EXE did not write full ML smoke marker' }
-          $j = Get-Content $marker -Raw | ConvertFrom-Json
-          $j | ConvertTo-Json -Depth 8 | Write-Host
-          if ($j.status -ne 'CHORDSCOPE_FULL_ML_RUNTIME_SMOKE_OK') { throw "Full ML smoke status: $($j.status)" }
-          foreach ($field in @('demucs_model','beat_this_model','lv_chordia_model','btc_model')) {
+          $proc = Start-Process -FilePath $env:CHORDSCOPE_EXE_PATH -ArgumentList '--full-runtime-smoke-test' -Wait -PassThru
+          $code=$proc.ExitCode
+          if (Test-Path $marker) {
+            $text=Get-Content $marker -Raw
+            Write-Host '===== PACKAGED FULL ML MARKER ====='
+            Write-Host $text
+          } else {
+            $text=''
+            Write-Host 'No full ML marker was produced.'
+          }
+          if ($code -ne 0) {
+            if ($text) {
+              try { $fail=$text | ConvertFrom-Json; throw "Packaged full ML smoke failed at stage '$($fail.stage)': $($fail.error_type): $($fail.error)" } catch [System.Management.Automation.RuntimeException] { throw }
+            }
+            throw "Packaged full ML smoke failed with exit code $code and no marker"
+          }
+          if (!(Test-Path $marker)) { throw 'Packaged executable did not write full ML smoke marker' }
+          $j = $text | ConvertFrom-Json
+          if ($j.status -ne 'CHORDSCOPE_FULL_ML_RUNTIME_SMOKE_OK') { throw "Full ML smoke status: $($j.status), stage=$($j.stage)" }
+          foreach ($field in @('demucs_model','beat_this_model','lv_chordia_model','btc_model','btc_isolation')) {
             if ($j.$field -ne 'ok') { throw "$field smoke missing" }
           }
           if ($j.build_variant -ne '${{ matrix.variant }}') { throw "Full smoke variant mismatch: $($j.build_variant)" }
+
+      - name: Stage successful package
+        working-directory: ChordScope_Desktop_V2_0
+        shell: pwsh
+        run: |
+          $pkg='package-output'
+          Remove-Item $pkg -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+          if ('${{ matrix.package_mode }}' -eq 'standalone') {
+            $dest=Join-Path $pkg 'ChordScope-NVIDIA-CUDA'
+            Copy-Item $env:CHORDSCOPE_EXE_DIR $dest -Recurse -Force
+          } else {
+            Copy-Item $env:CHORDSCOPE_EXE_PATH $pkg -Force
+            Copy-Item $env:CHORDSCOPE_SHA_PATH $pkg -Force
+          }
+          Copy-Item 'runtime_smoke_ok.json' $pkg -Force
+          Copy-Item 'full_runtime_smoke_ok.json' $pkg -Force
+          Copy-Item 'dist/nuitka-${{ matrix.variant }}.xml' $pkg -Force -ErrorAction SilentlyContinue
+          if ('${{ matrix.package_mode }}' -eq 'standalone') {
+            Copy-Item $env:CHORDSCOPE_SHA_PATH $pkg -Force
+          }
+          $sum=(Get-ChildItem $pkg -Recurse -File | Measure-Object Length -Sum).Sum
+          Write-Host "Package staged: $([math]::Round($sum/1MB,1)) MB"
 
       - name: Upload ${{ matrix.artifact_name }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: |
-            ChordScope_Desktop_V2_0/dist/${{ matrix.exe_name }}
-            ChordScope_Desktop_V2_0/dist/${{ matrix.exe_name }}.sha256.txt
-            ChordScope_Desktop_V2_0/runtime_smoke_ok.json
-            ChordScope_Desktop_V2_0/full_runtime_smoke_ok.json
+          path: ChordScope_Desktop_V2_0/package-output
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChordScope-Diagnostics-${{ matrix.variant }}-${{ github.run_number }}
+          path: |
+            ChordScope_Desktop_V2_0/runtime_smoke_ok.json
+            ChordScope_Desktop_V2_0/full_runtime_smoke_ok.json
+            ChordScope_Desktop_V2_0/dist/nuitka-${{ matrix.variant }}.xml
+          if-no-files-found: ignore
+          compression-level: 6
+          retention-days: 14
