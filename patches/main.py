@@ -17,57 +17,8 @@ def _bootstrap_marker(env_name: str, payload: dict) -> None:
         pass
 
 
-def _run_packaged_smoke(flag: str, env_name: str, smoke_kind: str) -> None:
-    """Dispatch CI smoke modes before normal startup shims can interfere.
-
-    Use explicit imports rather than __import__ so Nuitka can see and include the
-    two smoke modules in both onefile and standalone distributions.
-    """
-    if __name__ != "__main__" or flag not in sys.argv:
-        return
-    _bootstrap_marker(env_name, {
-        "status": "CHORDSCOPE_PACKAGED_SMOKE_BOOTSTRAP",
-        "flag": flag,
-        "argv": list(sys.argv),
-        "compiled": "__compiled__" in globals(),
-    })
-    try:
-        if smoke_kind == "basic":
-            from chordscope.runtime_smoke import run_runtime_smoke
-            func = run_runtime_smoke
-        elif smoke_kind == "full":
-            from chordscope.full_runtime_smoke import run_full_runtime_smoke
-            func = run_full_runtime_smoke
-        else:
-            raise RuntimeError(f"Unknown smoke kind: {smoke_kind}")
-        raise SystemExit(func())
-    except SystemExit:
-        raise
-    except BaseException as exc:
-        _bootstrap_marker(env_name, {
-            "status": "CHORDSCOPE_PACKAGED_SMOKE_BOOTSTRAP_FAILED",
-            "flag": flag,
-            "error_type": type(exc).__name__,
-            "error": str(exc),
-            "traceback": traceback.format_exc(),
-        })
-        raise SystemExit(1)
-
-
-_run_packaged_smoke(
-    "--runtime-smoke-test",
-    "CHORDSCOPE_SMOKE_MARKER",
-    "basic",
-)
-_run_packaged_smoke(
-    "--full-runtime-smoke-test",
-    "CHORDSCOPE_FULL_SMOKE_MARKER",
-    "full",
-)
-
-
 def _patch_numba_onefile_cache() -> None:
-    """Apply narrow Numba/Librosa compatibility shims for Nuitka packaged builds."""
+    """Apply narrow Numba/Librosa compatibility shims before any smoke/app import."""
     if "__compiled__" not in globals():
         return
 
@@ -114,7 +65,54 @@ def _patch_numba_onefile_cache() -> None:
         pass
 
 
+# Important: this must run before packaged smoke dispatch. Build #56 executed
+# the smoke tests before these compatibility hooks were installed.
 _patch_numba_onefile_cache()
+
+
+def _run_packaged_smoke(flag: str, env_name: str, smoke_kind: str) -> None:
+    """Dispatch CI smoke modes before normal GUI startup."""
+    if __name__ != "__main__" or flag not in sys.argv:
+        return
+    _bootstrap_marker(env_name, {
+        "status": "CHORDSCOPE_PACKAGED_SMOKE_BOOTSTRAP",
+        "flag": flag,
+        "argv": list(sys.argv),
+        "compiled": "__compiled__" in globals(),
+    })
+    try:
+        if smoke_kind == "basic":
+            from chordscope.runtime_smoke import run_runtime_smoke
+            func = run_runtime_smoke
+        elif smoke_kind == "full":
+            from chordscope.full_runtime_smoke import run_full_runtime_smoke
+            func = run_full_runtime_smoke
+        else:
+            raise RuntimeError(f"Unknown smoke kind: {smoke_kind}")
+        raise SystemExit(func())
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        _bootstrap_marker(env_name, {
+            "status": "CHORDSCOPE_PACKAGED_SMOKE_BOOTSTRAP_FAILED",
+            "flag": flag,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        })
+        raise SystemExit(1)
+
+
+_run_packaged_smoke(
+    "--runtime-smoke-test",
+    "CHORDSCOPE_SMOKE_MARKER",
+    "basic",
+)
+_run_packaged_smoke(
+    "--full-runtime-smoke-test",
+    "CHORDSCOPE_FULL_SMOKE_MARKER",
+    "full",
+)
 
 if __name__ == "__main__" and "--btc-worker" in sys.argv:
     from chordscope.analysis.chord_btc import run_btc_worker
