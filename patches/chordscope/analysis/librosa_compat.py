@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 import tempfile
@@ -10,15 +11,11 @@ import numpy as np
 from scipy import signal
 
 
-def _prepare_numba_runtime() -> None:
-    """Undo Nuitka's standalone no-JIT default before third-party Librosa imports.
+_CQT_EXPORTS = ("cqt", "hybrid_cqt", "pseudo_cqt", "vqt")
 
-    Librosa 0.11 uses Numba guvectorize/stencil internals that do not import
-    correctly with NUMBA_DISABLE_JIT=1. ChordScope's own DSP does not depend on
-    Numba, but LV-Chordia/BTC still require Librosa CQT, so enable the normal
-    Numba path only at this compatibility boundary and give its cache a writable
-    per-user temporary directory.
-    """
+
+def _prepare_numba_runtime() -> None:
+    """Prepare a writable Numba runtime for packaged third-party Librosa code."""
     os.environ.pop("NUMBA_DISABLE_JIT", None)
     cache_dir = Path(tempfile.gettempdir()) / "ChordScopeNumbaCache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -50,42 +47,66 @@ def _native_to_mono(y):
     return np.mean(x, axis=tuple(range(x.ndim - 1)))
 
 
-def _patch_constantq_numba_helper() -> None:
-    """Replace Librosa's tiny JIT helper with pure Python in compiled builds.
+def _load_constantq_eager(librosa_module):
+    """Load librosa.core.constantq without going through Librosa's lazy proxy.
 
-    Nuitka onefile compiles the Python body wrapped by Numba's CPUDispatcher.
-    Numba then attempts to inspect CPython bytecode for that already-compiled
-    function and raises ``RuntimeError: Compiled function bytecode used``.
-    The helper only counts powers of two, so an equivalent pure-Python function
-    avoids that unsupported boundary without changing CQT mathematics.
+    Nuitka onefile can leave the lazy-loader route in a partially initialized
+    state. Import the real module directly, discard any incomplete residue from
+    a previous attempt, patch the tiny Numba helper, and bind public CQT symbols
+    eagerly on both librosa and librosa.core.
     """
+    module_name = "librosa.core.constantq"
+    current = sys.modules.get(module_name)
+    if current is not None and not callable(getattr(current, "hybrid_cqt", None)):
+        sys.modules.pop(module_name, None)
+        core = sys.modules.get("librosa.core")
+        if core is not None:
+            core.__dict__.pop("constantq", None)
+
     try:
-        from librosa.core import constantq
-
-        def _num_two_factors(x):
-            value = int(x)
-            if value <= 0:
-                return 0
-            count = 0
-            while value % 2 == 0:
-                count += 1
-                value //= 2
-            return count
-
-        constantq.__dict__["__num_two_factors"] = _num_two_factors
+        constantq = importlib.import_module(module_name)
     except Exception:
-        # The runtime smoke test validates this compatibility path end-to-end.
-        pass
+        # Never keep a half-imported module: Librosa's lazy loader would reuse it
+        # and report a misleading circular-import AttributeError later.
+        broken = sys.modules.get(module_name)
+        if broken is not None and not callable(getattr(broken, "hybrid_cqt", None)):
+            sys.modules.pop(module_name, None)
+        raise
+
+    def _num_two_factors(x):
+        value = int(x)
+        if value <= 0:
+            return 0
+        count = 0
+        while value % 2 == 0:
+            count += 1
+            value //= 2
+        return count
+
+    # Librosa only uses this helper to count powers of two. Replacing the
+    # CPUDispatcher avoids Numba trying to inspect Nuitka-compiled bytecode.
+    constantq.__dict__["__num_two_factors"] = _num_two_factors
+
+    core = importlib.import_module("librosa.core")
+    core.__dict__["constantq"] = constantq
+    for name in _CQT_EXPORTS:
+        func = getattr(constantq, name, None)
+        if callable(func):
+            librosa_module.__dict__[name] = func
+            core.__dict__[name] = func
+
+    if not callable(librosa_module.__dict__.get("hybrid_cqt")):
+        raise RuntimeError("Librosa CQT compatibility bootstrap did not bind hybrid_cqt")
+    return constantq
 
 
-def patch_third_party_librosa_loader() -> None:
-    """Make Librosa usable by bundled third-party chord engines under Nuitka.
+def patch_third_party_librosa_loader():
+    """Make Librosa deterministic for LV-Chordia/BTC in Nuitka packages.
 
-    ChordScope itself no longer depends on ``librosa.load``. LV-Chordia and
-    BTC still use Librosa CQT. The CQT module imports ``librosa.core.audio``
-    for resampling, and that real module contains Numba JIT/stencil decorators
-    that are fragile in onefile builds. Install a small native shim before CQT
-    imports occur, while leaving Numba enabled for Librosa's CQT utilities.
+    ChordScope itself uses native decoding/DSP. Third-party chord engines still
+    need Librosa CQT. We replace the fragile audio submodule with native shims,
+    then eagerly import/bind constantq so no packaged code relies on Librosa's
+    lazy-loader circular-import path.
     """
     _prepare_numba_runtime()
     import librosa
@@ -115,6 +136,7 @@ def patch_third_party_librosa_loader() -> None:
         return float(np.asarray(y).shape[-1] / float(sr))
 
     stub = types.ModuleType("librosa.core.audio")
+    stub.__package__ = "librosa.core"
     stub.__dict__.update({
         "load": _load,
         "resample": _native_resample,
@@ -137,4 +159,5 @@ def patch_third_party_librosa_loader() -> None:
         core.__dict__["load"] = _load
         core.__dict__["resample"] = _native_resample
 
-    _patch_constantq_numba_helper()
+    _load_constantq_eager(librosa)
+    return librosa
