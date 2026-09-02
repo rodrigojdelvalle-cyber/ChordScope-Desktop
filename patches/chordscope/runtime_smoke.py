@@ -54,7 +54,10 @@ def run_runtime_smoke() -> int:
             import librosa
             ly,lsr=librosa.load(str(p),sr=22050,mono=True)
             assert len(ly)>10000 and lsr==22050
-            from librosa.core.constantq import hybrid_cqt
+            # librosa 0.11 exposes hybrid_cqt through the public package API;
+            # importing it from librosa.core.constantq is an internal-path assumption
+            # that breaks after compilation even though the supported API is present.
+            hybrid_cqt=getattr(librosa,'hybrid_cqt')
             cqt=hybrid_cqt(ly[:sr*2],sr=lsr,hop_length=512,n_bins=36,bins_per_octave=12,tuning=0.0)
             assert cqt.shape[0]==36 and cqt.shape[1]>5
 
