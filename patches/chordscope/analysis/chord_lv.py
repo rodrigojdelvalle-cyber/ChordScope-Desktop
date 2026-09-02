@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import gc
-import importlib.machinery
-import sys
-import types
+import importlib.resources
 from pathlib import Path
 from typing import Callable
 
@@ -24,34 +23,43 @@ def _release_torch_cache() -> None:
         pass
 
 
-def _ensure_lv_data_namespace() -> None:
-    """Expose bundled lv_chordia/data as an importable package in Nuitka builds.
+def _patch_lv_chordia_resources() -> None:
+    """Resolve lv-chordia 1.1.0 resources from its bundled data directory.
 
-    lv-chordia 1.1.0 ships its resource directory without an __init__.py. Nuitka
-    correctly bundles the files via --include-package-data, but importlib.resources
-    used by the legacy inference path still imports ``lv_chordia.data`` by name.
-    Under the packaged executable that namespace is otherwise absent. Register a
-    small namespace package pointing at the already-bundled data directory.
+    lv-chordia 1.1.0 calls importlib.resources.path("lv_chordia.data", ...).
+    Its ``data`` directory is not a regular Python package, and Nuitka may not
+    register it as an importable resource package even when the files are
+    correctly bundled. Intercept only that legacy resource lookup and return the
+    real bundled file path. Normal importlib.resources behavior is preserved for
+    every other package. This works in both CPython source runs and Nuitka builds.
     """
-    if "lv_chordia.data" in sys.modules:
+    current = importlib.resources.path
+    if getattr(current, "_chordscope_lv_patch", False):
         return
     try:
         import lv_chordia
-        root = Path(lv_chordia.__file__).resolve().parent
-        data_dir = root / "data"
+        data_dir = Path(lv_chordia.__file__).resolve().parent / "data"
         if not data_dir.is_dir():
             return
-        module = types.ModuleType("lv_chordia.data")
-        spec = importlib.machinery.ModuleSpec("lv_chordia.data", loader=None, is_package=True)
-        spec.submodule_search_locations = [str(data_dir)]
-        module.__spec__ = spec
-        module.__package__ = "lv_chordia.data"
-        module.__path__ = [str(data_dir)]
-        module.__file__ = str(data_dir / "__init__.py")
-        sys.modules["lv_chordia.data"] = module
-        setattr(lv_chordia, "data", module)
     except Exception:
-        pass
+        return
+
+    original = current
+
+    @contextlib.contextmanager
+    def _resource_path(package, resource):
+        package_name = package if isinstance(package, str) else getattr(package, "__name__", "")
+        if package_name == "lv_chordia.data":
+            target = data_dir / str(resource)
+            if not target.is_file():
+                raise FileNotFoundError(str(target))
+            yield target
+            return
+        with original(package, resource) as resolved:
+            yield resolved
+
+    _resource_path._chordscope_lv_patch = True
+    importlib.resources.path = _resource_path
 
 
 class LVChordiaEngine:
@@ -79,7 +87,7 @@ class LVChordiaEngine:
             return {}
         check_cancel(cancel_event)
         patch_third_party_librosa_loader()
-        _ensure_lv_data_namespace()
+        _patch_lv_chordia_resources()
         if progress:
             progress(5, f"{self.name} · cargando ensemble de 5 redes")
         try:
@@ -102,7 +110,7 @@ class LVChordiaEngine:
             return outputs
         except Exception:
             check_cancel(cancel_event)
-            _ensure_lv_data_namespace()
+            _patch_lv_chordia_resources()
             from lv_chordia.chord_recognition import chord_recognition
             outputs = {}
             for idx, vocabulary in enumerate(vocabularies):
