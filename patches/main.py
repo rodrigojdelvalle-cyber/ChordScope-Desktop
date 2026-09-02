@@ -17,13 +17,11 @@ def _bootstrap_marker(env_name: str, payload: dict) -> None:
         pass
 
 
-def _run_packaged_smoke(flag: str, env_name: str, module_name: str, func_name: str) -> None:
+def _run_packaged_smoke(flag: str, env_name: str, smoke_kind: str) -> None:
     """Dispatch CI smoke modes before normal startup shims can interfere.
 
-    The v2.0.2 #50 packaged binaries exited before their normal smoke marker was
-    produced. Keeping this dispatcher at the very top makes bootstrap/import
-    failures observable and also prevents application/UI startup from being
-    reached accidentally during CI validation.
+    Use explicit imports rather than __import__ so Nuitka can see and include the
+    two smoke modules in both onefile and standalone distributions.
     """
     if __name__ != "__main__" or flag not in sys.argv:
         return
@@ -34,8 +32,14 @@ def _run_packaged_smoke(flag: str, env_name: str, module_name: str, func_name: s
         "compiled": "__compiled__" in globals(),
     })
     try:
-        module = __import__(module_name, fromlist=[func_name])
-        func = getattr(module, func_name)
+        if smoke_kind == "basic":
+            from chordscope.runtime_smoke import run_runtime_smoke
+            func = run_runtime_smoke
+        elif smoke_kind == "full":
+            from chordscope.full_runtime_smoke import run_full_runtime_smoke
+            func = run_full_runtime_smoke
+        else:
+            raise RuntimeError(f"Unknown smoke kind: {smoke_kind}")
         raise SystemExit(func())
     except SystemExit:
         raise
@@ -53,14 +57,12 @@ def _run_packaged_smoke(flag: str, env_name: str, module_name: str, func_name: s
 _run_packaged_smoke(
     "--runtime-smoke-test",
     "CHORDSCOPE_SMOKE_MARKER",
-    "chordscope.runtime_smoke",
-    "run_runtime_smoke",
+    "basic",
 )
 _run_packaged_smoke(
     "--full-runtime-smoke-test",
     "CHORDSCOPE_FULL_SMOKE_MARKER",
-    "chordscope.full_runtime_smoke",
-    "run_full_runtime_smoke",
+    "full",
 )
 
 
