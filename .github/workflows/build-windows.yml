@@ -363,7 +363,6 @@ jobs:
             '--nofollow-import-to=matplotlib',
             '--nofollow-import-to=pytest',
             '--nofollow-import-to=IPython',
-            '--nofollow-import-to=torch.testing.*',
             '--report=dist/nuitka-${{ matrix.variant }}.xml'
           )
           python -m nuitka @args main.py
