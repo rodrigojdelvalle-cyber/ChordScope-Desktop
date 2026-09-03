@@ -47,16 +47,17 @@ def _native_to_mono(y):
     return np.mean(x, axis=tuple(range(x.ndim - 1)))
 
 
-def _patch_pitch_numba_helpers() -> None:
-    """Replace Librosa's parabolic interpolation gufunc with pure NumPy.
+def _patch_librosa_numba_helpers() -> None:
+    """Replace small Librosa Numba helpers that are unsafe after Nuitka compile.
 
-    Librosa 0.11 implements this helper with numba.guvectorize/stencil. In a
-    Nuitka executable Numba may try to inspect already-compiled bytecode and
-    raise ``RuntimeError: Compiled function bytecode used`` while LV-Chordia
-    calls ``estimate_tuning -> piptrack``. The NumPy implementation below is
-    algebraically identical to Librosa's stencil and preserves edge semantics.
+    LV-Chordia reaches Librosa pitch tracking from hybrid_cqt. In a Nuitka
+    executable Numba can try to inspect CPython bytecode for functions that are
+    already native-compiled and raise ``RuntimeError: Compiled function bytecode
+    used``. Keep the math in NumPy for the two helpers observed on this path:
+    parabolic interpolation and local maxima detection.
     """
     pitch = importlib.import_module("librosa.core.pitch")
+    utils = importlib.import_module("librosa.util.utils")
 
     def _parabolic_interpolation_numpy(x: np.ndarray, *, axis: int = -2) -> np.ndarray:
         arr = np.asarray(x)
@@ -78,17 +79,40 @@ def _patch_pitch_numba_helpers() -> None:
         shiftsi[..., 1:-1] = inner
         return np.swapaxes(shiftsi, -1, axis)
 
+    def _localmax_numpy(x: np.ndarray, *, axis: int = 0) -> np.ndarray:
+        """NumPy equivalent of librosa.util.localmax edge semantics."""
+        arr = np.asarray(x)
+        if arr.ndim == 0:
+            return np.asarray(False)
+        axis_norm = np.core.numeric.normalize_axis_index(axis, arr.ndim)
+        xi = np.moveaxis(arr, axis_norm, -1)
+        out = np.zeros(xi.shape, dtype=bool)
+        n = xi.shape[-1]
+        if n == 0:
+            return np.moveaxis(out, -1, axis_norm)
+        if n == 1:
+            out[..., 0] = True
+            return np.moveaxis(out, -1, axis_norm)
+
+        # Librosa localmax uses a strict comparison to the previous sample and
+        # a non-strict comparison to the following sample. The first element
+        # therefore cannot be a local maximum; the final element is compared
+        # only against its predecessor.
+        if n > 2:
+            out[..., 1:-1] = (xi[..., 1:-1] > xi[..., :-2]) & (xi[..., 1:-1] >= xi[..., 2:])
+        out[..., -1] = xi[..., -1] > xi[..., -2]
+        return np.moveaxis(out, -1, axis_norm)
+
     pitch.__dict__["_parabolic_interpolation"] = _parabolic_interpolation_numpy
+    utils.__dict__["localmax"] = _localmax_numpy
+    # pitch imports localmax into its module namespace, so replace that bound
+    # reference too; otherwise piptrack would keep calling the gufunc wrapper.
+    if "localmax" in pitch.__dict__:
+        pitch.__dict__["localmax"] = _localmax_numpy
 
 
 def _load_constantq_eager(librosa_module):
-    """Load librosa.core.constantq without going through Librosa's lazy proxy.
-
-    Nuitka onefile can leave the lazy-loader route in a partially initialized
-    state. Import the real module directly, discard any incomplete residue from
-    a previous attempt, patch the tiny Numba helper, and bind public CQT symbols
-    eagerly on both librosa and librosa.core.
-    """
+    """Load librosa.core.constantq without going through Librosa's lazy proxy."""
     module_name = "librosa.core.constantq"
     current = sys.modules.get(module_name)
     if current is not None and not callable(getattr(current, "hybrid_cqt", None)):
@@ -184,5 +208,5 @@ def patch_third_party_librosa_loader():
         core.__dict__["resample"] = _native_resample
 
     _load_constantq_eager(librosa)
-    _patch_pitch_numba_helpers()
+    _patch_librosa_numba_helpers()
     return librosa
