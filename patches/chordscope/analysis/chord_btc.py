@@ -63,9 +63,11 @@ def _release_torch_cache() -> None:
 class _LocalBTCModel:
     """BTC local loader without Transformers AutoModel.
 
-    v2.0.1 could stall at AutoModel.from_pretrained inside Nuitka onefile.
-    The offline BTC snapshot already vendors inference code and checkpoints, so
-    v2.0.2 loads btc_src directly and keeps the runtime dependency surface small.
+    The model weights live under ``vendor_models/btc-chord`` while the Python
+    inference package is staged as top-level ``btc_src`` and compiled by Nuitka.
+    Do not require a physical ``vendor_models/btc-chord/btc_src`` directory at
+    runtime: standalone/onefile builds legitimately package those modules in a
+    different location even though ``import btc_src`` works.
     """
 
     def __init__(self, repo_root: Path, device: str, large_voca: bool = True, stage=None):
@@ -74,27 +76,31 @@ class _LocalBTCModel:
         self.large_voca = bool(large_voca)
         if stage:
             stage(8, "verificando modelo offline")
-        required = [
-            self.repo_root / "btc_src" / "btc_model.py",
-            self.repo_root / "btc_src" / "features.py",
-            self.repo_root / ("btc_model_large_voca.pt" if self.large_voca else "btc_model.pt"),
-        ]
-        missing = [str(p.name) for p in required if not p.exists()]
-        if missing:
-            raise FileNotFoundError("BTC offline incompleto: " + ", ".join(missing))
+
+        checkpoint = self.repo_root / ("btc_model_large_voca.pt" if self.large_voca else "btc_model.pt")
+        if not checkpoint.is_file() or checkpoint.stat().st_size == 0:
+            raise FileNotFoundError(f"BTC offline incompleto: {checkpoint.name}")
+
         patch_third_party_librosa_loader()
-        if str(self.repo_root) not in sys.path:
-            sys.path.insert(0, str(self.repo_root))
+        # Source runs stage btc_src at project root; packaged runs compile it as
+        # an importable top-level package. The optional path insertion preserves
+        # source compatibility without assuming a physical package directory.
+        project_root = self.repo_root.parent.parent
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
         if stage:
             stage(18, "importando BTC local")
-        BTC_model = importlib.import_module("btc_src.btc_model").BTC_model
-        self.features = importlib.import_module("btc_src.features")
+        try:
+            BTC_model = importlib.import_module("btc_src.btc_model").BTC_model
+            self.features = importlib.import_module("btc_src.features")
+        except Exception as exc:
+            raise ImportError(f"BTC inference package no disponible: {type(exc).__name__}: {exc}") from exc
+
         self.device = "cuda:0" if device.startswith("cuda") and torch.cuda.is_available() else "cpu"
         num_chords = 170 if self.large_voca else 25
         if stage:
             stage(32, f"creando red · {self.device.upper()}")
         self.model = BTC_model(config=dict(_MODEL_CFG, num_chords=num_chords)).to(self.device)
-        checkpoint = self.repo_root / ("btc_model_large_voca.pt" if self.large_voca else "btc_model.pt")
         if stage:
             stage(48, "cargando pesos")
         ckpt = torch.load(str(checkpoint), map_location=self.device, weights_only=False)
