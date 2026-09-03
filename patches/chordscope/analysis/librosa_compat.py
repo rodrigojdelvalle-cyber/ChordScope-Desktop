@@ -47,6 +47,40 @@ def _native_to_mono(y):
     return np.mean(x, axis=tuple(range(x.ndim - 1)))
 
 
+def _patch_pitch_numba_helpers() -> None:
+    """Replace Librosa's parabolic interpolation gufunc with pure NumPy.
+
+    Librosa 0.11 implements this helper with numba.guvectorize/stencil. In a
+    Nuitka executable Numba may try to inspect already-compiled bytecode and
+    raise ``RuntimeError: Compiled function bytecode used`` while LV-Chordia
+    calls ``estimate_tuning -> piptrack``. The NumPy implementation below is
+    algebraically identical to Librosa's stencil and preserves edge semantics.
+    """
+    pitch = importlib.import_module("librosa.core.pitch")
+
+    def _parabolic_interpolation_numpy(x: np.ndarray, *, axis: int = -2) -> np.ndarray:
+        arr = np.asarray(x)
+        xi = np.swapaxes(arr, -1, axis)
+        shiftsi = np.zeros_like(xi)
+        if xi.shape[-1] < 3:
+            return np.swapaxes(shiftsi, -1, axis)
+
+        left = xi[..., :-2]
+        center = xi[..., 1:-1]
+        right = xi[..., 2:]
+        a = right + left - 2.0 * center
+        b = (right - left) / 2.0
+
+        valid = (np.abs(b) < np.abs(a)) & (a != 0)
+        inner = np.zeros_like(center)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            np.divide(-b, a, out=inner, where=valid)
+        shiftsi[..., 1:-1] = inner
+        return np.swapaxes(shiftsi, -1, axis)
+
+    pitch.__dict__["_parabolic_interpolation"] = _parabolic_interpolation_numpy
+
+
 def _load_constantq_eager(librosa_module):
     """Load librosa.core.constantq without going through Librosa's lazy proxy.
 
@@ -66,8 +100,6 @@ def _load_constantq_eager(librosa_module):
     try:
         constantq = importlib.import_module(module_name)
     except Exception:
-        # Never keep a half-imported module: Librosa's lazy loader would reuse it
-        # and report a misleading circular-import AttributeError later.
         broken = sys.modules.get(module_name)
         if broken is not None and not callable(getattr(broken, "hybrid_cqt", None)):
             sys.modules.pop(module_name, None)
@@ -83,8 +115,6 @@ def _load_constantq_eager(librosa_module):
             value //= 2
         return count
 
-    # Librosa only uses this helper to count powers of two. Replacing the
-    # CPUDispatcher avoids Numba trying to inspect Nuitka-compiled bytecode.
     constantq.__dict__["__num_two_factors"] = _num_two_factors
 
     core = importlib.import_module("librosa.core")
@@ -101,13 +131,7 @@ def _load_constantq_eager(librosa_module):
 
 
 def patch_third_party_librosa_loader():
-    """Make Librosa deterministic for LV-Chordia/BTC in Nuitka packages.
-
-    ChordScope itself uses native decoding/DSP. Third-party chord engines still
-    need Librosa CQT. We replace the fragile audio submodule with native shims,
-    then eagerly import/bind constantq so no packaged code relies on Librosa's
-    lazy-loader circular-import path.
-    """
+    """Make Librosa deterministic for LV-Chordia/BTC in Nuitka packages."""
     _prepare_numba_runtime()
     import librosa
     from .audio import load_mono
@@ -160,4 +184,5 @@ def patch_third_party_librosa_loader():
         core.__dict__["resample"] = _native_resample
 
     _load_constantq_eager(librosa)
+    _patch_pitch_numba_helpers()
     return librosa
